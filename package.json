@@ -1,0 +1,22 @@
+{
+  "name": "rapier-three-bitecs-starter",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@dimforge/rapier3d": "^0.16.0",
+    "bitecs": "^0.3.40",
+    "three": "^0.176.0"
+  },
+  "devDependencies": {
+    "@types/three": "^0.158.0",
+    "typescript": "^5.2.2",
+    "vite": "^6.3.1",
+    "vite-plugin-top-level-await": "^1.5.0",
+    "vite-plugin-wasm": "^3.4.1"
+  }
+}

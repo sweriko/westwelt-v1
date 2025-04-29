@@ -1,0 +1,79 @@
+/**
+ * Main player system that initializes and combines movement, look and shoot sub-systems
+ */
+import { addComponent, addEntity } from 'bitecs';
+import * as THREE from 'three';
+import {
+  MeshRef, Player, RigidBodyRef, Transform, FPController
+} from '../../components';
+import { ECS } from '../../world';
+import { MovementState } from '../../config';
+import { initPlayerMovementSystem } from './movementSystem';
+import { initPlayerLookSystem } from './lookSystem';
+import { initPlayerShootSystem } from './shootSystem';
+
+export function initPlayerSystem(world: ECS) {
+  const { rapier, physics, three, maps } = world.ctx;
+
+  /* entity + mesh holder ------------------------------------------- */
+  const pid = addEntity(world);
+  addComponent(world, Player,       pid);
+  addComponent(world, Transform,    pid);
+  addComponent(world, MeshRef,      pid);
+  addComponent(world, RigidBodyRef, pid);
+  addComponent(world, FPController, pid);
+  
+  // Initialize controller state
+  FPController.pitch[pid] = 0;
+  FPController.vertVel[pid] = 0;
+  FPController.moveState[pid] = MovementState.GROUNDED;
+  FPController.lastGrounded[pid] = performance.now();
+  FPController.lastJump[pid] = 0;
+  FPController.lastShot[pid] = 0;
+  FPController.jumpRequested[pid] = 0;
+  FPController.lastJumpRequest[pid] = 0;
+
+  const holder = new THREE.Object3D();
+  holder.position.set(0, 3, 6);
+  holder.add(three.camera);
+  three.scene.add(holder);
+  maps.mesh.set(pid, holder);
+
+  /* Rapier kinematic capsule --------------------------------------- */
+  const rb = physics.createRigidBody(
+    rapier.RigidBodyDesc.kinematicPositionBased()
+          .setTranslation(holder.position.x, holder.position.y, holder.position.z)
+          .setCcdEnabled(true)
+  );
+  const collider = physics.createCollider(
+    rapier.ColliderDesc.capsule(0.9, 0.3).setFriction(0.2), rb
+  );
+
+  const kcc = physics.createCharacterController(0.01);
+  kcc.setApplyImpulsesToDynamicBodies(true);
+  kcc.setUp({ x: 0, y: 1, z: 0 });
+  kcc.enableAutostep(0.5, 0.3, true);
+  kcc.enableSnapToGround(0.3);
+
+  maps.rb.set(pid, rb);
+  RigidBodyRef.id[pid] = rb.handle;
+  
+  // Store KCC and collider for use in movement system
+  world.ctx.kcc = kcc;
+  world.ctx.playerCollider = collider;
+
+  // Initialize sub-systems
+  const movementSystem = initPlayerMovementSystem(world);
+  const lookSystem = initPlayerLookSystem(world);
+  const shootSystem = initPlayerShootSystem(world);
+
+  /* Combined system ------------------------------------------------- */
+  return (w: ECS) => {
+    // Run all sub-systems in sequence
+    lookSystem(w);
+    movementSystem(w);
+    shootSystem(w);
+    
+    return w;
+  };
+} 
