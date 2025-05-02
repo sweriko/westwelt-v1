@@ -1,4 +1,4 @@
-import * as RAPIER from '@dimforge/rapier3d';
+import * as RAPIER from '@dimforge/rapier3d-compat';
 import { createContext, populateScene } from './ecs/scene';
 import { createECS } from './ecs/world';
 import { startGameLoop } from './gameloop';
@@ -10,6 +10,9 @@ const canvas = document.getElementById('c') as HTMLCanvasElement;
  * Main application entry point
  */
 async function main() {
+  /* Initialize Rapier WASM module first */
+  await RAPIER.init();
+  
   /* bootstrap Three + Rapier context (physics world still empty) */
   const ctx = await createContext(canvas, RAPIER);
 

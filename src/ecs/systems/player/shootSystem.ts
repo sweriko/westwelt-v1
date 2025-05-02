@@ -41,7 +41,7 @@ export function initPlayerShootSystem(_world: ECS) {
 /* bullet helper ---------------------------------------------------- */
 function spawnBullet(
   w: ECS, camera: THREE.Camera,
-  R: typeof import('@dimforge/rapier3d')
+  R: typeof import('@dimforge/rapier3d-compat')
 ) {
   const { physics, maps } = w.ctx;
 

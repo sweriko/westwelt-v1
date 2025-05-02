@@ -1,39 +1,6 @@
 <goal>
- I want to develop the first AAA Browser game, its gonna be like this:
--multiplayer extraction shooter/battle royale like fast pace mechanic, upto 10-20 players per lobby
--There are 3 scenes, each player has his own train/airship cabin-this is their main spawn and where they store their loot/weapons/customization
-when they leave through the door of their cabin, they join a lobby which manifests by them walking into a big main section of the train/airship, it will have a bar, poker table, gamble machines, minigame entertainment (all of that will be added later on) and its here where the player gather, once enough players, a raid starts, manifesting the third scene:
--The raid map, the side of the airship opens fully up, underneath them is a vast basic desert landscape and a big town, the raid starts, now everyone has upto 1min time to jump down as the ship cruises around the map, at the ground, player have to loot and fight each other, after  5mins the airship returns with a rope attached to it cruising above the town, now players can either keep looting or try to catch the airship by grabbing the rope and extracting at any time.
--if succesfully extracted (takes about 3s to go up the rope, you can still be shot down by others during that), you spawn back into your cabin where you can store the loot you gatherd, repair your weapons, making yourself ready for the next lobby.
--the ship will remain there for 5-10mins or so, if a player doesnt manage to get there by time, he dies 
-
-The amount/filesize of the 3D models will be kept minimal but very good looking nevertheless, I am aiming for a styized painterly cel shaded anime style
--The cabin will be made out of a basis model, then safe, gunrack, workbench, animated 2D loop of cloudy sky behind the window, random slight turbulende shake effects for more immersivness, godrays
--The lobby cabin will be similar, just bigger, a few more models, still fake sky visible through the clouds and such 
--The raid map will be a procedural or maybe pregenerated lightweight terrain, each town building will be a seperate model, but low-mid poly and about 50-100 buildings max, I ll try to have a building (including texture) be under 0.5mb, either skybox or lighweight raymarched volumetric clouds and sun/sky system
--Its gonna be fps, but the viewmodel (what the player sees in fps) and playermodel (what you perceive the other player as) will be unified as one, we will also eventually integrate ragdoll effects, and propably even procedural character animation
--Its wild western/steampunk-arcane style themed, so weapons will be forms of revolvers, shotguns and such
-Before each raid, a player has to equip himself with, well, what he has, he can equip one big and one small weapon (revolver, shotgun), ammunition, ammo belt (for quicker reload, but can only hold one type of ammo), poncho+pants+shoes+hat which all just give a tiny bit of protection points
--if he dies in a raid, he looses all of what he had equipped
-
-The loot in town is varied, consisting of mostly resources, weapon parts, rarely whole weapons, ammo, armour
--the further complex resource system for crafting and trading and loottable will be added later on, for now there will only be gold nuggets as loot, spawning randomized in the town buildings
--when a player kills someone else in the raid, they can grab their loot (what they have equipped themselves with and what they looted already)
-
-""""""
-
-So far, I have coded this three/rapier/bitecs starter project that I wanted to use as my solid base to build everything upon, do you think this is a good starter/architecture?
-I also want you to provide me with a high level development plan (dont include dates and such) for all the parts of code/systems/components/backend/frontend that will have to be coded to achieve the game I want.
-
-intuitivly i can currently think of:
--redis+postgresql for hot/cold db
--custom ws architecture with super low latency and compact data format, something like messagepack or such (no clue), maybe delta compression idk, proper client side prediction, interpolation, reconsiliation
--node express server (is that the best modern approach?) with authority
--highly performant animation state machine (for the playermodels)
--multiple hitzone logic (body/headshot)
--highly performant rapier ragdoll logic on death, and when jumping down onto the town when "landing" on the ground (funny)
--how to manage the 3 main scenes? seperate pages/ecs? or just different scenes?, and whats the most performant and modern way to preload the assets in a smart way?
--best ecs architecture approach?
+should i swap out rapier3d against rapier3d-compat?
+what do you think?
 </goal>
 
 

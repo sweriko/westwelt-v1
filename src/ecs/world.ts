@@ -11,7 +11,7 @@ import { initGrassSystem }     from './systems/grass.ts';
 import * as THREE from 'three';
 
 // Import Rapier types - use a type-only import to avoid runtime loading
-import type * as RAPIER from '@dimforge/rapier3d';
+import type * as RAPIER from '@dimforge/rapier3d-compat';
 
 /** Create ECS world + pipeline */
 export function createECS(ctx: ECSContext) {

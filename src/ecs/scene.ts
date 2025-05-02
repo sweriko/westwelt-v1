@@ -13,7 +13,7 @@ import { SceneConfig } from './config';
 /* createContext – bootstrap renderer / physics / camera              */
 export async function createContext(
   canvas: HTMLCanvasElement,
-  RAPIER: typeof import('@dimforge/rapier3d')
+  RAPIER: typeof import('@dimforge/rapier3d-compat')
 ): Promise<ECSContext> {
   /* Rapier ---------------------------------------------------------- */
   const rapier = RAPIER;
