@@ -7,6 +7,7 @@ import { initRenderSyncSystem }from './systems/renderSync.ts';
 import { initDebugVisSystem }  from './systems/debugVis.ts';
 import { initCollisionSystem } from './systems/collision.ts';
 import { initTimeStepSystem }  from './systems/timeStep.ts';
+import { initGrassSystem }     from './systems/grass.ts';
 import * as THREE from 'three';
 
 // Import Rapier types - use a type-only import to avoid runtime loading
@@ -33,6 +34,7 @@ export function createECS(ctx: ECSContext) {
     initPhysicsSystem(world),   // Physics runs before collision system to process contacts
     initCollisionSystem(world), // Now handles Rapier collision events instead of raycasting
     initProjectileSystem(world),
+    initGrassSystem(world),     // Add grass system
     initDebugVisSystem(world),
     initRenderSyncSystem(world)
   );

@@ -1,0 +1,2162 @@
+<goal>
+ I want to develop the first AAA Browser game, its gonna be like this:
+-multiplayer extraction shooter/battle royale like fast pace mechanic, upto 10-20 players per lobby
+-There are 3 scenes, each player has his own train/airship cabin-this is their main spawn and where they store their loot/weapons/customization
+when they leave through the door of their cabin, they join a lobby which manifests by them walking into a big main section of the train/airship, it will have a bar, poker table, gamble machines, minigame entertainment (all of that will be added later on) and its here where the player gather, once enough players, a raid starts, manifesting the third scene:
+-The raid map, the side of the airship opens fully up, underneath them is a vast basic desert landscape and a big town, the raid starts, now everyone has upto 1min time to jump down as the ship cruises around the map, at the ground, player have to loot and fight each other, after  5mins the airship returns with a rope attached to it cruising above the town, now players can either keep looting or try to catch the airship by grabbing the rope and extracting at any time.
+-if succesfully extracted (takes about 3s to go up the rope, you can still be shot down by others during that), you spawn back into your cabin where you can store the loot you gatherd, repair your weapons, making yourself ready for the next lobby.
+-the ship will remain there for 5-10mins or so, if a player doesnt manage to get there by time, he dies 
+
+The amount/filesize of the 3D models will be kept minimal but very good looking nevertheless, I am aiming for a styized painterly cel shaded anime style
+-The cabin will be made out of a basis model, then safe, gunrack, workbench, animated 2D loop of cloudy sky behind the window, random slight turbulende shake effects for more immersivness, godrays
+-The lobby cabin will be similar, just bigger, a few more models, still fake sky visible through the clouds and such 
+-The raid map will be a procedural or maybe pregenerated lightweight terrain, each town building will be a seperate model, but low-mid poly and about 50-100 buildings max, I ll try to have a building (including texture) be under 0.5mb, either skybox or lighweight raymarched volumetric clouds and sun/sky system
+-Its gonna be fps, but the viewmodel (what the player sees in fps) and playermodel (what you perceive the other player as) will be unified as one, we will also eventually integrate ragdoll effects, and propably even procedural character animation
+-Its wild western/steampunk-arcane style themed, so weapons will be forms of revolvers, shotguns and such
+Before each raid, a player has to equip himself with, well, what he has, he can equip one big and one small weapon (revolver, shotgun), ammunition, ammo belt (for quicker reload, but can only hold one type of ammo), poncho+pants+shoes+hat which all just give a tiny bit of protection points
+-if he dies in a raid, he looses all of what he had equipped
+
+The loot in town is varied, consisting of mostly resources, weapon parts, rarely whole weapons, ammo, armour
+-the further complex resource system for crafting and trading and loottable will be added later on, for now there will only be gold nuggets as loot, spawning randomized in the town buildings
+-when a player kills someone else in the raid, they can grab their loot (what they have equipped themselves with and what they looted already)
+
+""""""
+
+So far, I have coded this three/rapier/bitecs starter project that I wanted to use as my solid base to build everything upon, do you think this is a good starter/architecture?
+I also want you to provide me with a high level development plan (dont include dates and such) for all the parts of code/systems/components/backend/frontend that will have to be coded to achieve the game I want.
+
+intuitivly i can currently think of:
+-redis+postgresql for hot/cold db
+-custom ws architecture with super low latency and compact data format, something like messagepack or such (no clue), maybe delta compression idk, proper client side prediction, interpolation, reconsiliation
+-node express server (is that the best modern approach?) with authority
+-highly performant animation state machine (for the playermodels)
+-multiple hitzone logic (body/headshot)
+-highly performant rapier ragdoll logic on death, and when jumping down onto the town when "landing" on the ground (funny)
+-how to manage the 3 main scenes? seperate pages/ecs? or just different scenes?, and whats the most performant and modern way to preload the assets in a smart way?
+-best ecs architecture approach?
+</goal>
+
+
+<context>
+    <codebase>
+Directory structure:
+└── /./
+    ├── index.html
+    ├── package.json
+    ├── src/
+    │   ├── ecs/
+    │   │   ├── components.ts
+    │   │   ├── config.ts
+    │   │   ├── scene.ts
+    │   │   ├── systems/
+    │   │   │   ├── collision.ts
+    │   │   │   ├── debugVis.ts
+    │   │   │   ├── input.ts
+    │   │   │   ├── physics.ts
+    │   │   │   ├── player/
+    │   │   │   │   ├── index.ts
+    │   │   │   │   ├── lookSystem.ts
+    │   │   │   │   ├── movementSystem.ts
+    │   │   │   │   └── shootSystem.ts
+    │   │   │   ├── projectile.ts
+    │   │   │   ├── renderSync.ts
+    │   │   │   └── timeStep.ts
+    │   │   ├── timeUtils.ts
+    │   │   ├── utils/
+    │   │   │   ├── eventUtils.ts
+    │   │   │   └── mathUtils.ts
+    │   │   └── world.ts
+    │   ├── gameloop.ts
+    │   └── main.ts
+    ├── tsconfig.json
+    └── vite.config.ts
+
+================================================
+File: /index.html
+================================================
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1.0" />
+  <title>Rapier × Three × bitecs starter</title>
+  <style>html,body{margin:0;height:100%;overflow:hidden}</style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
+
+
+================================================
+File: /package.json
+================================================
+{
+  "name": "rapier-three-bitecs-starter",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@dimforge/rapier3d": "^0.16.0",
+    "bitecs": "^0.3.40",
+    "three": "^0.176.0"
+  },
+  "devDependencies": {
+    "@types/three": "^0.158.0",
+    "typescript": "^5.2.2",
+    "vite": "^6.3.1",
+    "vite-plugin-top-level-await": "^1.5.0",
+    "vite-plugin-wasm": "^3.4.1"
+  }
+}
+
+
+================================================
+File: /src/ecs/components.ts
+================================================
+import { Types, defineComponent } from 'bitecs';
+
+/** World-space transform (quat-pos) */
+export const Transform = defineComponent({
+  x: Types.f32, y: Types.f32, z: Types.f32,
+  qx: Types.f32, qy: Types.f32, qz: Types.f32, qw: Types.f32
+});
+
+/** Linear velocity – used for projectiles */
+export const Velocity = defineComponent({ x: Types.f32, y: Types.f32, z: Types.f32 });
+
+/** TTL in milliseconds (bullets) */
+export const Lifespan = defineComponent({ ttl: Types.f32, born: Types.f32 });
+
+/** Debug visualization flag - used to store current debug state */
+export const DebugVis = defineComponent({ active: Types.ui8 });
+
+/** First-person controller state */
+export const FPController = defineComponent({
+  pitch: Types.f32,        // Camera pitch angle
+  vertVel: Types.f32,      // Vertical velocity
+  moveState: Types.ui8,    // 0=Grounded, 1=Jumping, 2=Falling
+  lastGrounded: Types.f32, // Time when last grounded
+  lastJump: Types.f32,     // Time when last jumped
+  lastShot: Types.f32,     // Time when last shot
+  jumpRequested: Types.ui8,// Jump buffer flag
+  lastJumpRequest: Types.f32 // Time when jump was requested
+});
+
+/** Debug visualization mesh references */
+export const DebugMeshRef = defineComponent({ id: Types.ui32 });
+
+/** Trajectory for debug visualization */
+export const Trajectory = defineComponent({
+  // No data needed, just a tag to indicate an entity has a trajectory
+});
+
+/** Collision event data */
+export const CollisionEvent = defineComponent({
+  entity1: Types.ui32,     // First entity in collision
+  entity2: Types.ui32,     // Second entity in collision
+  impulse: Types.f32,      // Collision impulse magnitude
+  time: Types.f32          // When collision occurred
+});
+
+/** Tags */
+export const Player   = defineComponent();
+export const Projectile = defineComponent();
+export const CubeTag  = defineComponent();
+
+/** Foreign-object indirection – store handles in JS Maps */
+export const RigidBodyRef = defineComponent({ id: Types.ui32 });
+export const MeshRef      = defineComponent({ id: Types.ui32 });
+
+
+================================================
+File: /src/ecs/config.ts
+================================================
+/**
+ * Global configuration values
+ */
+
+export const PlayerConfig = {
+  // Movement
+  WALK_SPEED: 8,
+  SPRINT_FACTOR: 1.8,
+  AIR_CONTROL: 0.7,
+  JUMP_VEL: 14,
+  GRAVITY: 20,
+  TERMINAL_FALL: -20,
+  
+  // Timing
+  JUMP_CD_MS: 300,
+  COYOTE_MS: 150,
+  JUMP_BUFFER_MS: 200,
+  
+  // Look
+  MOUSE_SENSITIVITY: 0.0035
+};
+
+export const WeaponConfig = {
+  SHOOT_CD_MS: 200,
+  BULLET_SPEED: 40,
+  BULLET_TTL_MS: 5000,
+  BULLET_SPAWN_DISTANCE: 1.5
+};
+
+export const PhysicsConfig = {
+  IMPACT_FORCE: 20.0,
+  SOLVER_ITERATIONS: 4,     // More iterations for better stability
+  CCD_SUBSTEPS: 4,          // Increase CCD substeps for better bullet collisions
+  VELOCITY_THRESHOLD: 30.0  // Velocity magnitude threshold for enabling CCD
+};
+
+export const TimeStepConfig = {
+  FIXED_DT: 1/60,          // 60Hz physics update
+  MAX_STEPS: 5,            // Max physics steps per frame to prevent spiral of death
+  MAX_FRAME_TIME: 0.25,    // Maximum time to spend catching up
+  MIN_DT: 1/240            // Minimum sensible delta (240Hz)
+};
+
+export const SceneConfig = {
+  // Ground
+  GROUND_COLOR: 0x1a5f2a,
+  GROUND_SIZE: 200,
+  
+  // Sky
+  SKY_COLOR: 0x87CEEB,
+  
+  // Cubes
+  CUBE_STACK_SIZE: 6,
+  EXTRA_CUBES: 20,
+  CUBE_RESTITUTION: 0.4,
+  CUBE_FRICTION: 0.5,
+  
+  // Lighting
+  AMBIENT_LIGHT_INTENSITY: 0.8,
+  DIRECTIONAL_LIGHT_INTENSITY: 1.0
+};
+
+// Movement state enum values
+export const MovementState = {
+  GROUNDED: 0,
+  JUMPING: 1,
+  FALLING: 2
+}; 
+
+================================================
+File: /src/ecs/scene.ts
+================================================
+/**********************************************************************
+ * scene.ts – Three + Rapier initialisation & scene population
+ *********************************************************************/
+import * as THREE  from 'three';
+import { addComponent, addEntity } from 'bitecs';
+import {
+  CubeTag, MeshRef, RigidBodyRef, Transform
+} from './components';
+import { ECS, ECSContext } from './world';
+import { SceneConfig } from './config';
+
+/* ------------------------------------------------------------------ */
+/* createContext – bootstrap renderer / physics / camera              */
+export async function createContext(
+  canvas: HTMLCanvasElement,
+  RAPIER: typeof import('@dimforge/rapier3d')
+): Promise<ECSContext> {
+  /* Rapier ---------------------------------------------------------- */
+  const rapier = RAPIER;
+  const physics = new rapier.World({ x: 0, y: -9.81, z: 0 });
+
+  /* Three renderer -------------------------------------------------- */
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+  renderer.setPixelRatio(window.devicePixelRatio);
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type    = THREE.PCFSoftShadowMap;
+
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(SceneConfig.SKY_COLOR);
+  scene.fog        = new THREE.FogExp2(0x88BBFF, 0.0025);
+
+  const camera = new THREE.PerspectiveCamera(
+    75, window.innerWidth / window.innerHeight, 0.1, 1000
+  );
+
+  // Set up window resize handler
+  setupWindowResize(camera, renderer);
+
+  // Create context object
+  const ctx: ECSContext = {
+    rapier, physics,
+    three: { scene, camera, renderer },
+    maps : { mesh: new Map(), rb: new Map() }
+  };
+
+  // Set up lighting, sky and ground
+  setupLighting(ctx);
+  setupSky(ctx);
+  setupGround(ctx);
+
+  return ctx;
+}
+
+/* ------------------------------------------------------------------ */
+/* Helper function to set up window resize handling                   */
+function setupWindowResize(camera: THREE.PerspectiveCamera, renderer: THREE.WebGLRenderer) {
+  window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  });
+}
+
+/* ------------------------------------------------------------------ */
+/* Helper function to set up scene lighting                           */
+function setupLighting(ctx: ECSContext) {
+  const scene = ctx.three.scene;
+  
+  // Add ambient light
+  scene.add(new THREE.AmbientLight(
+    0xffffff, SceneConfig.AMBIENT_LIGHT_INTENSITY
+  ));
+
+  // Add directional light with shadows
+  const dirLight = new THREE.DirectionalLight(
+    0xffffff, SceneConfig.DIRECTIONAL_LIGHT_INTENSITY
+  );
+  dirLight.position.set(5, 10, 7);
+  dirLight.castShadow = true;
+  dirLight.shadow.mapSize.set(2048, 2048);
+  dirLight.shadow.camera.left = -20;
+  dirLight.shadow.camera.right = 20;
+  dirLight.shadow.camera.top = 20;
+  dirLight.shadow.camera.bottom = -20;
+  dirLight.shadow.camera.near = 0.5;
+  dirLight.shadow.camera.far  = 50;
+  scene.add(dirLight);
+}
+
+/* ------------------------------------------------------------------ */
+/* Helper function to create sky dome                                 */
+function setupSky(ctx: ECSContext) {
+  const scene = ctx.three.scene;
+  const sky = new THREE.SphereGeometry(400, 32, 15).scale(-1, 1, 1);
+  scene.add(new THREE.Mesh(
+    sky, 
+    new THREE.MeshBasicMaterial({ 
+      color: SceneConfig.SKY_COLOR, 
+      side: THREE.BackSide 
+    })
+  ));
+}
+
+/* ------------------------------------------------------------------ */
+/* Helper function to create ground plane                             */
+function setupGround(ctx: ECSContext) {
+  const scene = ctx.three.scene;
+  const { rapier, physics } = ctx;
+  
+  const HALF_H = 0.05;                 // 0.1 m thick collider
+  const GROUND_Y = -HALF_H;
+  const SIZE = SceneConfig.GROUND_SIZE;
+
+  // Create ground mesh
+  const groundMesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(SIZE, SIZE).rotateX(-Math.PI / 2),
+    new THREE.MeshStandardMaterial({ 
+      color: SceneConfig.GROUND_COLOR, 
+      roughness: 0.8, 
+      metalness: 0.2 
+    })
+  );
+  groundMesh.receiveShadow = true;
+  groundMesh.position.y    = GROUND_Y;
+  scene.add(groundMesh);
+
+  // Create ground collider
+  const groundBody = physics.createRigidBody(
+    rapier.RigidBodyDesc.fixed().setTranslation(0, GROUND_Y, 0)
+  );
+  physics.createCollider(
+    rapier.ColliderDesc.cuboid(SIZE/2, HALF_H, SIZE/2), groundBody
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* populateScene – central cube stack + scattered cubes               */
+export function populateScene(world: ECS, ctx: ECSContext): void {
+  const { rapier, physics, maps, three } = ctx;
+  
+  // Create shared geometry and materials for cube factory
+  const geometries = new Map<number, THREE.BoxGeometry>();
+  const materials = new Map<number, THREE.MeshStandardMaterial>();
+  
+  // Cube factory function with reused geometries/materials
+  const makeCube = (
+    x: number, y: number, z: number,
+    size = 1, color = Math.random() * 0xffffff
+  ) => {
+    /* Three mesh ---------------------------------------------------- */
+    // Reuse or create geometry
+    if (!geometries.has(size)) {
+      geometries.set(size, new THREE.BoxGeometry(size, size, size));
+    }
+    
+    // Reuse material if same color (within tolerance) or create new
+    let material: THREE.MeshStandardMaterial | undefined;
+    for (const [existingColor, existingMaterial] of materials.entries()) {
+      // Allow for small color differences (hex representation)
+      if (Math.abs(existingColor - color) < 100) {
+        material = existingMaterial;
+        break;
+      }
+    }
+    
+    if (!material) {
+      material = new THREE.MeshStandardMaterial({ 
+        color, 
+        roughness: 0.7, 
+        metalness: 0.3 
+      });
+      materials.set(color, material);
+    }
+    
+    const mesh = new THREE.Mesh(geometries.get(size)!, material);
+    mesh.castShadow = mesh.receiveShadow = true;
+    mesh.position.set(x, y, z);
+    three.scene.add(mesh);
+
+    /* Rapier body --------------------------------------------------- */
+    const rb = physics.createRigidBody(
+      rapier.RigidBodyDesc.dynamic()
+            .setTranslation(x, y, z)
+            .setCcdEnabled(true)
+    );
+    physics.createCollider(
+      rapier.ColliderDesc.cuboid((size * 0.98) / 2, (size * 0.98) / 2, (size * 0.98) / 2)
+            .setRestitution(SceneConfig.CUBE_RESTITUTION)
+            .setFriction(SceneConfig.CUBE_FRICTION),
+      rb
+    );
+
+    /* ECS entity ---------------------------------------------------- */
+    const eid = addEntity(world);
+    addComponent(world, CubeTag,     eid);
+    addComponent(world, Transform,   eid);
+    addComponent(world, MeshRef,     eid);
+    addComponent(world, RigidBodyRef,eid);
+
+    maps.mesh.set(eid, mesh);
+    maps.rb.set(eid, rb);
+    RigidBodyRef.id[eid] = rb.handle;
+    
+    // Update handle map
+    if (world.ctx.entityHandleMap) {
+      world.ctx.entityHandleMap.set(rb.handle, eid);
+    }
+  };
+
+  /* Create cube stacks */
+  const stackSize = SceneConfig.CUBE_STACK_SIZE;
+  const halfStack = stackSize / 2;
+  
+  // Make a cube stack
+  for (let y = 0; y < stackSize; ++y)
+    for (let x = 0; x < stackSize; ++x)
+      for (let z = 0; z < stackSize; ++z)
+        makeCube(x - halfStack, y + 0.5, z - halfStack);
+
+  /* extra cubes */
+  for (let i = 0; i < SceneConfig.EXTRA_CUBES; i++)
+    makeCube(
+      (Math.random() - 0.5) * 20,
+      10 + Math.random() * 10,
+      (Math.random() - 0.5) * 20,
+      0.5 + Math.random() * 1.5
+    );
+}
+
+
+================================================
+File: /src/ecs/systems/collision.ts
+================================================
+import { defineQuery, addComponent, addEntity, hasComponent } from 'bitecs';
+import { Projectile, CubeTag, RigidBodyRef, CollisionEvent } from '../components';
+import { ECS } from '../world';
+import { vec3Pool, createEntityPairKey } from '../utils/mathUtils';
+import { PhysicsConfig } from '../config';
+
+export function initCollisionSystem(world: ECS) {
+  const projectileQuery = defineQuery([Projectile, RigidBodyRef]);
+  const cubeQuery = defineQuery([CubeTag, RigidBodyRef]);
+  
+  // Last processed collision time to avoid duplicates
+  const processedCollisions = new Map<bigint, number>();
+  
+  // Cache of rigid body handles to entity IDs
+  // Initialize entity handle mapping
+  if (!world.ctx.entityHandleMap) {
+    world.ctx.entityHandleMap = new Map<number, number>();
+  }
+  
+  // Helper to mark entities for deletion outside the hot collision loop
+  function markEntityForDeletion(eid: number) {
+    const mesh = world.ctx.maps.mesh.get(eid);
+    if (mesh) {
+      if (!mesh.userData) mesh.userData = {};
+      mesh.userData.markedForDeletion = true;
+    }
+  }
+  
+  return (w: ECS) => {
+    const now = performance.now();
+    
+    // Clean up old processed collisions (older than 200ms)
+    for (const [key, time] of processedCollisions.entries()) {
+      if (now - time > 200) {
+        processedCollisions.delete(key);
+      }
+    }
+    
+    // Skip if no event queue is available
+    if (!w.ctx.eventQueue) {
+      return w;
+    }
+    
+    // Cache query results once per tick
+    const projectiles = projectileQuery(w);
+    const cubes = cubeQuery(w);
+    
+    // Update entity handle map for any new entities
+    for (const eid of projectiles) {
+      const rb = w.ctx.maps.rb.get(eid);
+      if (rb && !w.ctx.entityHandleMap!.has(rb.handle)) {
+        w.ctx.entityHandleMap!.set(rb.handle, eid);
+      }
+    }
+    
+    for (const eid of cubes) {
+      const rb = w.ctx.maps.rb.get(eid);
+      if (rb && !w.ctx.entityHandleMap!.has(rb.handle)) {
+        w.ctx.entityHandleMap!.set(rb.handle, eid);
+      }
+    }
+    
+    // Process collision events from Rapier physics
+    w.ctx.eventQueue.drainCollisionEvents((handle1: number, handle2: number, started: boolean) => {
+      // We only care about collision starts
+      if (!started) return;
+      
+      // Get entity IDs from rigid body handles
+      const entity1 = w.ctx.entityHandleMap!.get(handle1);
+      const entity2 = w.ctx.entityHandleMap!.get(handle2);
+      
+      if (!entity1 || !entity2) return;
+      
+      // Use hasComponent for O(1) lookups instead of array.includes()
+      const isProjectile1 = hasComponent(w, Projectile, entity1);
+      const isProjectile2 = hasComponent(w, Projectile, entity2);
+      const isCube1 = hasComponent(w, CubeTag, entity1);
+      const isCube2 = hasComponent(w, CubeTag, entity2);
+      
+      // Skip if not a projectile-cube collision
+      if (!((isProjectile1 && isCube2) || (isProjectile2 && isCube1))) {
+        return;
+      }
+      
+      // Determine which is which
+      const projectileEid = isProjectile1 ? entity1 : entity2;
+      const cubeEid = isCube1 ? entity1 : entity2;
+      
+      // Create a unique ID for this collision using BigInt
+      const collisionId = createEntityPairKey(projectileEid, cubeEid);
+      
+      // Skip if we've already processed this collision recently
+      if (processedCollisions.has(collisionId)) return;
+      
+      // Mark collision as processed
+      processedCollisions.set(collisionId, now);
+      
+      // Get the cube and projectile rigid bodies
+      const cubeRB = w.ctx.maps.rb.get(cubeEid);
+      const projectileRB = w.ctx.maps.rb.get(projectileEid);
+      
+      if (!cubeRB || !projectileRB) return;
+      
+      // Calculate impact direction - from bullet to cube center
+      const bulletPos = projectileRB.translation();
+      const cubePos = cubeRB.translation();
+      
+      // Direction vector from bullet to cube center (where to push the cube)
+      // Use pooled vector
+      const impactDir = vec3Pool.get().set(
+        cubePos.x - bulletPos.x,
+        cubePos.y - bulletPos.y,
+        cubePos.z - bulletPos.z
+      ).normalize();
+      
+      // If direction is zero (e.g., direct center hit), use reversed bullet velocity
+      if (impactDir.lengthSq() < 0.001) {
+        const vel = projectileRB.linvel();
+        impactDir.set(-vel.x, -vel.y, -vel.z).normalize();
+      }
+      
+      // Apply impulse force at contact point in direction from bullet to cube
+      cubeRB.applyImpulseAtPoint(
+        { 
+          x: impactDir.x * PhysicsConfig.IMPACT_FORCE, 
+          y: impactDir.y * PhysicsConfig.IMPACT_FORCE, 
+          z: impactDir.z * PhysicsConfig.IMPACT_FORCE 
+        },
+        {
+          x: bulletPos.x,
+          y: bulletPos.y,
+          z: bulletPos.z
+        },
+        true
+      );
+      
+      // Add some random torque for realistic effect
+      cubeRB.applyTorqueImpulse(
+        {
+          x: (Math.random() - 0.5) * PhysicsConfig.IMPACT_FORCE * 0.3,
+          y: (Math.random() - 0.5) * PhysicsConfig.IMPACT_FORCE * 0.3,
+          z: (Math.random() - 0.5) * PhysicsConfig.IMPACT_FORCE * 0.3
+        },
+        true
+      );
+      
+      // Create a collision event entity
+      const eventEid = addEntity(w);
+      addComponent(w, CollisionEvent, eventEid);
+      CollisionEvent.entity1[eventEid] = projectileEid;
+      CollisionEvent.entity2[eventEid] = cubeEid;
+      CollisionEvent.impulse[eventEid] = PhysicsConfig.IMPACT_FORCE;
+      CollisionEvent.time[eventEid] = now;
+      
+      // Mark projectile for destruction
+      markEntityForDeletion(projectileEid);
+      
+      // Release pooled vector
+      vec3Pool.release(impactDir);
+    });
+    
+    return w;
+  };
+} 
+
+================================================
+File: /src/ecs/systems/debugVis.ts
+================================================
+import { defineQuery } from 'bitecs';
+import { DebugVis, Projectile, Player, RigidBodyRef } from '../components';
+import { ECS } from '../world';
+import * as THREE from 'three';
+import { vec3Pool } from '../utils/mathUtils';
+
+// Maximum number of points in trajectory
+const MAX_TRAJECTORY_POINTS = 100;
+
+export function initDebugVisSystem(world: ECS) {
+  const debugQuery = defineQuery([DebugVis]);
+  const playerQuery = defineQuery([Player, RigidBodyRef]);
+  const projectileQuery = defineQuery([Projectile, RigidBodyRef]);
+  
+  // Store trajectory data
+  const trajectoryLines = new Map<number, THREE.Line>();
+  const trajectories = new Map<number, {
+    count: number,  // Current number of points
+    maxCount: number  // Maximum capacity
+  }>();
+  
+  // Store pre-allocated buffers to avoid creating new ones each frame
+  const positionBuffers = new Map<number, {
+    array: Float32Array,
+    attribute: THREE.BufferAttribute
+  }>();
+  
+  // Shared line material for all trajectories
+  const lineMaterial = new THREE.LineBasicMaterial({ 
+    color: 0xff9900, 
+    transparent: true, 
+    opacity: 0.7 
+  });
+  
+  // Create player capsule mesh for debug
+  let playerCapsule: THREE.Mesh | null = null;
+  
+  // Create a simple cylinder geometry
+  const createCylinderGeometry = (radius: number, height: number, widthSegments = 16): THREE.BufferGeometry => {
+    // Create cylinder body
+    return new THREE.CylinderGeometry(
+      radius, radius, height - radius * 2, widthSegments, 1, true
+    );
+  };
+  
+  // Initialize the debug capsule and materials
+  const wireframeMaterial = new THREE.MeshBasicMaterial({
+    color: 0x00ffff,
+    wireframe: true,
+    transparent: true,
+    opacity: 0.7
+  });
+  
+  // Create the capsule mesh once at initialization
+  const capsuleGeometry = createCylinderGeometry(0.3, 1.8, 16);
+  playerCapsule = new THREE.Mesh(capsuleGeometry, wireframeMaterial);
+  world.ctx.three.scene.add(playerCapsule);
+  playerCapsule.visible = false; // Hidden by default
+  
+  return (w: ECS) => {
+    // First check if debug visualization is enabled
+    const debugEnts = debugQuery(w);
+    const debugId = debugEnts.length > 0 ? debugEnts[0] : -1;
+    const debugActive = debugId !== -1 && DebugVis.active[debugId] === 1;
+    
+    // Update player capsule visibility and position
+    if (playerCapsule) {
+      playerCapsule.visible = debugActive;
+      
+      // Update position if visible
+      if (debugActive) {
+        const playerEnts = playerQuery(w);
+        if (playerEnts.length > 0) {
+          const playerEid = playerEnts[0];
+          const playerObj = w.ctx.maps.mesh.get(playerEid);
+          if (playerObj) {
+            playerCapsule.position.copy(playerObj.position);
+            playerCapsule.position.y -= 0.3; // Adjust to match center of capsule
+            playerCapsule.rotation.y = playerObj.rotation.y;
+          }
+        }
+      }
+    }
+    
+    // Update projectile trajectories
+    for (const projectileEid of projectileQuery(w)) {
+      // Get current position for this projectile
+      const rb = w.ctx.maps.rb.get(projectileEid);
+      if (!rb) continue;
+      
+      // Get position and add to trajectory
+      const pos = rb.translation();
+      const currentPos = vec3Pool.get().set(pos.x, pos.y, pos.z);
+      
+      // Initialize trajectory and buffer if needed
+      if (!trajectories.has(projectileEid)) {
+        // Create trajectory tracking object
+        trajectories.set(projectileEid, {
+          count: 0,
+          maxCount: MAX_TRAJECTORY_POINTS
+        });
+        
+        // Pre-allocate the Float32Array with maximum size
+        const posArray = new Float32Array(MAX_TRAJECTORY_POINTS * 3);
+        const posAttribute = new THREE.BufferAttribute(posArray, 3);
+        positionBuffers.set(projectileEid, {
+          array: posArray,
+          attribute: posAttribute
+        });
+      }
+      
+      // Get the trajectory data
+      const trajectory = trajectories.get(projectileEid)!;
+      // Get the buffer
+      const buffer = positionBuffers.get(projectileEid)!;
+      
+      // Add current position directly to the buffer
+      if (trajectory.count < MAX_TRAJECTORY_POINTS) {
+        // We have room, add at the end
+        const idx = trajectory.count * 3;
+        buffer.array[idx] = currentPos.x;
+        buffer.array[idx + 1] = currentPos.y;
+        buffer.array[idx + 2] = currentPos.z;
+        trajectory.count++;
+      } else {
+        // Shift all points one position back using copyWithin (much faster than loop)
+        buffer.array.copyWithin(0, 3);
+        
+        // Add new point at the end
+        const idx = (trajectory.count - 1) * 3;
+        buffer.array[idx] = currentPos.x;
+        buffer.array[idx + 1] = currentPos.y;
+        buffer.array[idx + 2] = currentPos.z;
+      }
+      
+      // Mark buffer for update
+      buffer.attribute.needsUpdate = true;
+      
+      // Release the pooled vector
+      vec3Pool.release(currentPos);
+      
+      // Only update/show trajectory lines if debug is active
+      if (debugActive) {
+        if (trajectoryLines.has(projectileEid)) {
+          // Update existing line - reuse the geometry
+          const line = trajectoryLines.get(projectileEid)!;
+          line.visible = true;
+          
+          // Get the pre-allocated buffer and update it
+          const buffer = positionBuffers.get(projectileEid)!;
+          
+          // Update geometry to draw only the current points
+          line.geometry.setDrawRange(0, trajectory.count);
+          buffer.attribute.needsUpdate = true;
+        } else {
+          // Create new line with dynamic buffer geometry
+          const geometry = new THREE.BufferGeometry();
+          const buffer = positionBuffers.get(projectileEid)!;
+          
+          // Add attribute to geometry
+          geometry.setAttribute('position', buffer.attribute);
+          
+          // Set initial draw range
+          geometry.setDrawRange(0, trajectory.count);
+          
+          // Use the shared material
+          const line = new THREE.Line(geometry, lineMaterial);
+          trajectoryLines.set(projectileEid, line);
+          w.ctx.three.scene.add(line);
+        }
+      } else {
+        // Hide lines if debug is disabled
+        if (trajectoryLines.has(projectileEid)) {
+          trajectoryLines.get(projectileEid)!.visible = false;
+        }
+      }
+    }
+    
+    // Clean up trajectories for removed projectiles
+    for (const [eid, line] of trajectoryLines.entries()) {
+      const projectileExists = projectileQuery(w).includes(eid);
+      
+      // Check if projectile is marked for deletion
+      const mesh = w.ctx.maps.mesh.get(eid);
+      const markedForDeletion = mesh?.userData?.markedForDeletion === true;
+      
+      if (!projectileExists || markedForDeletion) {
+        // Remove the trajectory line
+        w.ctx.three.scene.remove(line);
+        line.geometry.dispose();
+        if (line.material instanceof THREE.Material) {
+          line.material.dispose();
+        } else if (Array.isArray(line.material)) {
+          line.material.forEach(mat => mat.dispose());
+        }
+        trajectoryLines.delete(eid);
+        trajectories.delete(eid);
+        positionBuffers.delete(eid);
+      }
+    }
+    
+    return w;
+  };
+} 
+
+================================================
+File: /src/ecs/systems/input.ts
+================================================
+import { addComponent, addEntity } from 'bitecs';
+import { DebugVis } from '../components';
+import { ECS } from '../world';
+import { safeAddEventListener, setupEventCleanup } from '../utils/eventUtils';
+
+// Add property to Window interface
+declare global {
+  interface Window {
+    listenersAttached?: boolean;
+  }
+}
+
+export interface InputState {
+  fw: boolean; bk: boolean; lf: boolean; rt: boolean;
+  sprint: boolean;
+  shoot: boolean; jump: boolean;
+  pointerLocked: boolean;
+  dx: number; dy: number;
+  debugActive: boolean;
+}
+
+export function initInputSystem(world: ECS) {
+  const state: InputState = {
+    fw: false, bk: false, lf: false, rt: false,
+    sprint: false,
+    shoot: false, jump: false,
+    pointerLocked: false,
+    dx: 0, dy: 0,
+    debugActive: false
+  };
+  
+  // Keep track of whether V was pressed last frame
+  let vWasPressed = false;
+  
+  // Create a singleton debug entity and add the component to it
+  const debugId = addEntity(world); // Create a new entity, don't assume ID 0
+  addComponent(world, DebugVis, debugId);
+  DebugVis.active[debugId] = 0; // 0 = off, 1 = on
+
+  /* keyboard ------------------------------------------------------- */
+  const key = (code: string, v: boolean) => {
+    if (code === 'KeyW' || code === 'ArrowUp')    state.fw     = v;
+    if (code === 'KeyS' || code === 'ArrowDown')  state.bk     = v;
+    if (code === 'KeyA' || code === 'ArrowLeft')  state.lf     = v;
+    if (code === 'KeyD' || code === 'ArrowRight') state.rt     = v;
+    if (code === 'Space')                         state.jump   = v;
+    if (code === 'ShiftLeft' || code === 'ShiftRight') state.sprint = v;
+    
+    // Handle V key press for debug visualization toggle
+    if (code === 'KeyV') {
+      // Toggle on key down only
+      if (v && !vWasPressed) {
+        // Toggle debug state
+        const newState = DebugVis.active[debugId] === 0 ? 1 : 0;
+        DebugVis.active[debugId] = newState;
+        state.debugActive = newState === 1;
+        console.log(`Debug visualization: ${state.debugActive ? 'ON' : 'OFF'}`);
+      }
+      vWasPressed = v;
+    }
+  };
+  
+  // Only attach event listeners once
+  if (!window.listenersAttached) {
+    safeAddEventListener(window, 'keydown', e => key((e as KeyboardEvent).code, true));
+    safeAddEventListener(window, 'keyup',   e => key((e as KeyboardEvent).code, false));
+
+    /* mouse ---------------------------------------------------------- */
+    const canvas = document.getElementById('c') as HTMLCanvasElement;
+    safeAddEventListener(canvas, 'click', () => canvas.requestPointerLock());
+
+    safeAddEventListener(document, 'pointerlockchange', () => {
+      state.pointerLocked = !!document.pointerLockElement;
+    });
+
+    safeAddEventListener(window, 'mousemove', e => {
+      if (!state.pointerLocked) return;
+      state.dx += (e as MouseEvent).movementX;
+      state.dy += (e as MouseEvent).movementY;
+    });
+
+    safeAddEventListener(window, 'mousedown', e => { if ((e as MouseEvent).button === 0) state.shoot = true; });
+    safeAddEventListener(window, 'mouseup',   e => { if ((e as MouseEvent).button === 0) state.shoot = false; });
+    
+    // Set up event cleanup
+    setupEventCleanup();
+    
+    // Mark listeners as attached
+    window.listenersAttached = true;
+  }
+
+  return (w: ECS) => { 
+    // Set the input state on the world
+    w.input = state;
+    return w;
+  };
+}
+
+
+================================================
+File: /src/ecs/systems/physics.ts
+================================================
+import { defineQuery, exitQuery } from 'bitecs';
+import { RigidBodyRef } from '../components';
+import { ECS } from '../world';
+import { PhysicsConfig, TimeStepConfig } from '../config';
+
+export function initPhysicsSystem(_world: ECS) {
+  const rbq = defineQuery([RigidBodyRef]);
+  const exit = exitQuery(rbq);
+
+  /* cleanup on entity removal */
+  return (w: ECS) => {
+    // Skip physics if we're not on a physics frame
+    if (!w.time.shouldRunPhysics) {
+      return w;
+    }
+    
+    // Get all active rigid bodies
+    const rigidBodies = [];
+    for (const eid of rbq(w)) {
+      const rb = w.ctx.maps.rb.get(eid);
+      if (rb) rigidBodies.push(rb);
+    }
+    
+    // Dynamically enable CCD on fast-moving objects
+    for (const rb of rigidBodies) {
+      try {
+        // Different versions of Rapier have different APIs
+        // Check if the body is dynamic (only dynamic bodies can have CCD)
+        const isDynamic = rb.bodyType && 
+                         rb.bodyType() === w.ctx.rapier.RigidBodyType.Dynamic;
+        
+        if (isDynamic) {
+          const vel = rb.linvel();
+          const speed = Math.sqrt(vel.x * vel.x + vel.y * vel.y + vel.z * vel.z);
+          
+          // Enable CCD for fast moving objects 
+          // Check if this version of Rapier supports CCD toggling
+          if (speed > PhysicsConfig.VELOCITY_THRESHOLD && rb.enableCcd) {
+            rb.enableCcd(true);
+          } 
+          // Disable CCD for slower objects to improve performance
+          else if (speed < PhysicsConfig.VELOCITY_THRESHOLD * 0.8 && rb.enableCcd) {
+            rb.enableCcd(false);
+          }
+        }
+      } catch (e) {
+        // Skip CCD handling if the API doesn't match
+      }
+    }
+    
+    // Configure physics parameters if the API supports it
+    try {
+      if (w.ctx.physics.integrationParameters) {
+        // Set solver iterations for more accurate simulation
+        w.ctx.physics.integrationParameters.numSolverIterations = PhysicsConfig.SOLVER_ITERATIONS;
+        
+        // Increase CCD substeps - critical for bullet physics!
+        w.ctx.physics.integrationParameters.maxCcdSubsteps = PhysicsConfig.CCD_SUBSTEPS;
+      }
+    } catch (e) {
+      // Skip if the API doesn't support this
+    }
+    
+    // Always use the fixed timestep from the time system
+    const dt = w.time.fixedDt || TimeStepConfig.FIXED_DT;
+    
+    // Process physics step with fixed timestep - handle type issues with assertions
+    if (w.ctx.eventQueue) {
+      // Call step with the correct argument order based on Rapier type definitions
+      // Type assertion needed due to version differences in Rapier API
+      (w.ctx.physics.step as any)(w.ctx.eventQueue, dt);
+    } else {
+      // Type assertion needed due to differences in Rapier API versions
+      (w.ctx.physics.step as any)(dt);
+    }
+
+    /* purge removed RigidBodies */
+    for (const eid of exit(w)) {
+      const rb = w.ctx.maps.rb.get(eid);
+      if (rb) {
+        w.ctx.physics.removeRigidBody(rb);
+        w.ctx.maps.rb.delete(eid);
+      }
+    }
+    return w;
+  };
+}
+
+
+================================================
+File: /src/ecs/systems/player/index.ts
+================================================
+/**
+ * Main player system that initializes and combines movement, look and shoot sub-systems
+ */
+import { addComponent, addEntity } from 'bitecs';
+import * as THREE from 'three';
+import {
+  MeshRef, Player, RigidBodyRef, Transform, FPController
+} from '../../components';
+import { ECS } from '../../world';
+import { MovementState } from '../../config';
+import { initPlayerMovementSystem } from './movementSystem';
+import { initPlayerLookSystem } from './lookSystem';
+import { initPlayerShootSystem } from './shootSystem';
+
+export function initPlayerSystem(world: ECS) {
+  const { rapier, physics, three, maps } = world.ctx;
+
+  /* entity + mesh holder ------------------------------------------- */
+  const pid = addEntity(world);
+  addComponent(world, Player,       pid);
+  addComponent(world, Transform,    pid);
+  addComponent(world, MeshRef,      pid);
+  addComponent(world, RigidBodyRef, pid);
+  addComponent(world, FPController, pid);
+  
+  // Initialize controller state
+  FPController.pitch[pid] = 0;
+  FPController.vertVel[pid] = 0;
+  FPController.moveState[pid] = MovementState.GROUNDED;
+  FPController.lastGrounded[pid] = performance.now();
+  FPController.lastJump[pid] = 0;
+  FPController.lastShot[pid] = 0;
+  FPController.jumpRequested[pid] = 0;
+  FPController.lastJumpRequest[pid] = 0;
+
+  const holder = new THREE.Object3D();
+  holder.position.set(0, 3, 6);
+  holder.add(three.camera);
+  three.scene.add(holder);
+  maps.mesh.set(pid, holder);
+
+  /* Rapier kinematic capsule --------------------------------------- */
+  const rb = physics.createRigidBody(
+    rapier.RigidBodyDesc.kinematicPositionBased()
+          .setTranslation(holder.position.x, holder.position.y, holder.position.z)
+          .setCcdEnabled(true)
+  );
+  const collider = physics.createCollider(
+    rapier.ColliderDesc.capsule(0.9, 0.3).setFriction(0.2), rb
+  );
+
+  const kcc = physics.createCharacterController(0.01);
+  kcc.setApplyImpulsesToDynamicBodies(true);
+  kcc.setUp({ x: 0, y: 1, z: 0 });
+  kcc.enableAutostep(0.5, 0.3, true);
+  kcc.enableSnapToGround(0.3);
+
+  maps.rb.set(pid, rb);
+  RigidBodyRef.id[pid] = rb.handle;
+  
+  // Store KCC and collider for use in movement system
+  world.ctx.kcc = kcc;
+  world.ctx.playerCollider = collider;
+
+  // Initialize sub-systems
+  const movementSystem = initPlayerMovementSystem(world);
+  const lookSystem = initPlayerLookSystem(world);
+  const shootSystem = initPlayerShootSystem(world);
+
+  /* Combined system ------------------------------------------------- */
+  return (w: ECS) => {
+    // Run all sub-systems in sequence
+    lookSystem(w);
+    movementSystem(w);
+    shootSystem(w);
+    
+    return w;
+  };
+} 
+
+================================================
+File: /src/ecs/systems/player/lookSystem.ts
+================================================
+/**
+ * Player look system - handles camera movement via mouse input
+ */
+import { defineQuery } from 'bitecs';
+import * as THREE from 'three';
+import { Player, FPController } from '../../components';
+import { ECS } from '../../world';
+import { InputState } from '../input';
+import { PlayerConfig } from '../../config';
+
+export function initPlayerLookSystem(_world: ECS) {
+  const playerQuery = defineQuery([Player, FPController]);
+
+  return (w: ECS) => {
+    const input = w.input as InputState;
+    // Input check removed - initInputSystem is guaranteed to run first
+
+    // Skip if pointer isn't locked
+    if (!input.pointerLocked) {
+      input.dx = input.dy = 0;
+      return w;
+    }
+
+    for (const eid of playerQuery(w)) {
+      // Get the player object that holds the camera
+      const holder = w.ctx.maps.mesh.get(eid);
+      if (!holder) continue;
+      
+      // Update yaw (horizontal rotation)
+      holder.rotation.y = (holder.rotation.y - input.dx * PlayerConfig.MOUSE_SENSITIVITY) % (Math.PI * 2);
+      if (holder.rotation.y < 0) holder.rotation.y += Math.PI * 2;
+
+      // Update pitch (vertical look) with clamping
+      FPController.pitch[eid] = THREE.MathUtils.clamp(
+        FPController.pitch[eid] - input.dy * PlayerConfig.MOUSE_SENSITIVITY, 
+        -Math.PI / 2,  // Look up limit
+        Math.PI / 2    // Look down limit
+      );
+      
+      // Apply pitch to camera
+      const camera = w.ctx.three.camera;
+      if (camera) {
+        camera.rotation.x = FPController.pitch[eid];
+      }
+    }
+    
+    // Reset mouse deltas after processing
+    input.dx = input.dy = 0;
+    
+    return w;
+  };
+} 
+
+================================================
+File: /src/ecs/systems/player/movementSystem.ts
+================================================
+/**
+ * Player movement system - handles movement, jumping, and physics integration
+ */
+import { defineQuery } from 'bitecs';
+import { Player, RigidBodyRef, FPController } from '../../components';
+import { ECS } from '../../world';
+import { InputState } from '../input';
+import { vec2Pool, vec3Pool } from '../../utils/mathUtils';
+import { PlayerConfig, MovementState } from '../../config';
+
+export function initPlayerMovementSystem(_world: ECS) {
+  const playerQuery = defineQuery([Player, RigidBodyRef, FPController]);
+  
+  // Reused vector objects to avoid allocations
+  const dir = vec3Pool.get();
+  const horiz = vec2Pool.get();
+  
+  // Track the previous jump state to require releasing space before jumping again
+  let prevJump = false;
+
+  return (w: ECS) => {
+    const input = w.input as InputState;
+    // Input check removed - initInputSystem is guaranteed to run first
+    
+    const now = performance.now();
+    
+    for (const eid of playerQuery(w)) {
+      const rb = w.ctx.maps.rb.get(eid);
+      const kcc = w.ctx.kcc; // Character controller from player init
+      const playerCollider = w.ctx.playerCollider;
+      
+      // Skip if we don't have all required components
+      if (!rb || !kcc || !playerCollider) continue;
+      
+      // Get the player mesh holder
+      const holder = w.ctx.maps.mesh.get(eid);
+      if (!holder) continue;
+      
+      /* movement state + gravity ------------------------------------- */
+      const grounded = kcc.computedGrounded();
+      if (grounded) FPController.lastGrounded[eid] = now;
+
+      if (grounded) {
+        FPController.moveState[eid] = MovementState.GROUNDED;
+      } else {
+        FPController.moveState[eid] = FPController.vertVel[eid] > 0 ? 
+          MovementState.JUMPING : MovementState.FALLING;
+      }
+      
+      // Handle jump buffering - store jump request timing
+      // Only allow a new jump request if space was released since last jump
+      const jumpPressed = input.jump && !prevJump;
+      if (jumpPressed && FPController.jumpRequested[eid] === 0) {
+        FPController.jumpRequested[eid] = 1;
+        FPController.lastJumpRequest[eid] = now;
+      } else if (!input.jump) {
+        FPController.jumpRequested[eid] = 0;
+      }
+
+      // Check if we can jump with either direct input or buffered input
+      const canJump = (grounded || now - FPController.lastGrounded[eid] < PlayerConfig.COYOTE_MS) && 
+                      now - FPController.lastJump[eid] > PlayerConfig.JUMP_CD_MS;
+      
+      // Execute jump if conditions met, including buffered jumps
+      if (canJump && (jumpPressed || (now - FPController.lastJumpRequest[eid] < PlayerConfig.JUMP_BUFFER_MS))) {
+        FPController.vertVel[eid] = PlayerConfig.JUMP_VEL;
+        FPController.lastJump[eid] = now;
+        FPController.jumpRequested[eid] = 0;
+      }
+
+      // Store previous jump state for next frame
+      prevJump = input.jump;
+
+      if (FPController.moveState[eid] !== MovementState.GROUNDED) {
+        // Apply gravity with framerate-independent scaling
+        FPController.vertVel[eid] = Math.max(
+          FPController.vertVel[eid] - PlayerConfig.GRAVITY * w.time.dt, 
+          PlayerConfig.TERMINAL_FALL
+        );
+      } else {
+        FPController.vertVel[eid] *= 0.8;
+        if (Math.abs(FPController.vertVel[eid]) < 0.1) FPController.vertVel[eid] = 0;
+      }
+
+      /* directional input -------------------------------------------- */
+      dir.set(
+        (input.rt ? 1 : 0) - (input.lf ? 1 : 0),
+        0,
+        (input.bk ? 1 : 0) - (input.fw ? 1 : 0)
+      );
+      
+      if (dir.lengthSq() > 0) dir.normalize();
+      
+      // Get a temporary up vector, use it, then release it
+      const upVector = vec3Pool.get().set(0, 1, 0);
+      dir.applyAxisAngle(upVector, holder.rotation.y);
+      vec3Pool.release(upVector);
+
+      // Base speed calculation
+      const speed = PlayerConfig.WALK_SPEED *
+                    (FPController.moveState[eid] === MovementState.GROUNDED ? 
+                      1 : PlayerConfig.AIR_CONTROL) *
+                    (input.sprint ? PlayerConfig.SPRINT_FACTOR : 1);
+
+      horiz.set(dir.x * speed, dir.z * speed);
+
+      /* KCC integration ---------------------------------------------- */
+      // Always scale movement by delta time for frame independence
+      const dt = w.time.shouldRunPhysics ? w.time.fixedDt! : w.time.dt;
+      
+      const requested = {
+        x: horiz.x * dt,
+        y: FPController.vertVel[eid] * dt,
+        z: horiz.y * dt
+      };
+      
+      // Now safe to use playerCollider since we checked it above
+      kcc.computeColliderMovement(playerCollider, requested);
+      const actual = kcc.computedMovement();
+
+      if (FPController.vertVel[eid] > 0 && actual.y < requested.y * 0.9) {
+        FPController.vertVel[eid] = 0; // head hit
+      }
+
+      const p = rb.translation();
+      rb.setNextKinematicTranslation({
+        x: p.x + actual.x,
+        y: p.y + actual.y,
+        z: p.z + actual.z
+      });
+      
+      holder.position.set(p.x + actual.x, p.y + actual.y, p.z + actual.z);
+    }
+    
+    return w;
+  };
+} 
+
+================================================
+File: /src/ecs/systems/player/shootSystem.ts
+================================================
+/**
+ * Player shooting system - handles weapon firing
+ */
+import { addComponent, addEntity, defineQuery } from 'bitecs';
+import * as THREE from 'three';
+import { Player, FPController, Projectile, Lifespan, Velocity, MeshRef, RigidBodyRef, Transform } from '../../components';
+import { ECS } from '../../world';
+import { InputState } from '../input';
+import { vec3Pool } from '../../utils/mathUtils';
+import { WeaponConfig } from '../../config';
+
+export function initPlayerShootSystem(_world: ECS) {
+  const playerQuery = defineQuery([Player, FPController]);
+  
+  // Track the previous shoot state to detect start of shooting
+  let prevShoot = false;
+
+  return (w: ECS) => {
+    const input = w.input as InputState;
+    // Input check removed - initInputSystem is guaranteed to run first
+    
+    const now = performance.now();
+    
+    for (const eid of playerQuery(w)) {
+      // Detect shoot button pressed (not held)
+      const shootStart = input.shoot && !prevShoot;
+      
+      if (shootStart && now - FPController.lastShot[eid] > WeaponConfig.SHOOT_CD_MS) {
+        spawnBullet(w, w.ctx.three.camera, w.ctx.rapier);
+        FPController.lastShot[eid] = now;
+      }
+    }
+    
+    // Store shoot state for next frame
+    prevShoot = input.shoot;
+    
+    return w;
+  };
+}
+
+/* bullet helper ---------------------------------------------------- */
+function spawnBullet(
+  w: ECS, camera: THREE.Camera,
+  R: typeof import('@dimforge/rapier3d')
+) {
+  const { physics, maps } = w.ctx;
+
+  const eid = addEntity(w);
+  addComponent(w, Projectile,   eid);
+  addComponent(w, Lifespan,     eid);
+  addComponent(w, RigidBodyRef, eid);
+  addComponent(w, MeshRef,      eid);
+  addComponent(w, Transform,    eid);
+  // Velocity component is for future client-side prediction
+  addComponent(w, Velocity,     eid);
+
+  Lifespan.ttl[eid]  = WeaponConfig.BULLET_TTL_MS;
+  Lifespan.born[eid] = performance.now();
+
+  /* mesh */
+  const mesh = new THREE.Mesh(
+    new THREE.SphereGeometry(0.1, 8, 8),
+    new THREE.MeshStandardMaterial({
+      color: 0xff9900, roughness: 0.3, metalness: 0.7,
+      emissive: 0xff9900, emissiveIntensity: 0.5
+    })
+  );
+  mesh.castShadow = true;
+
+  // Get direction from camera (reuse vectors)
+  const dir = vec3Pool.get();
+  camera.getWorldDirection(dir).normalize();
+  
+  // Get spawn position (reuse vectors)
+  const spawn = vec3Pool.get();
+  camera.getWorldPosition(spawn).addScaledVector(dir, WeaponConfig.BULLET_SPAWN_DISTANCE);
+  
+  // Apply to mesh
+  mesh.position.copy(spawn);
+
+  // Add to scene
+  w.ctx.three.scene.add(mesh);
+  maps.mesh.set(eid, mesh);
+
+  /* rigid body */
+  // Store velocity for client-side prediction
+  Velocity.x[eid] = dir.x * WeaponConfig.BULLET_SPEED;
+  Velocity.y[eid] = dir.y * WeaponConfig.BULLET_SPEED;
+  Velocity.z[eid] = dir.z * WeaponConfig.BULLET_SPEED;
+
+  // Create a rigid body with CCD enabled to prevent tunneling at high speeds
+  const rb = physics.createRigidBody(
+    R.RigidBodyDesc.dynamic()
+      .setTranslation(spawn.x, spawn.y, spawn.z)
+      .setCcdEnabled(true)
+      .setLinvel(dir.x * WeaponConfig.BULLET_SPEED, 
+                dir.y * WeaponConfig.BULLET_SPEED, 
+                dir.z * WeaponConfig.BULLET_SPEED)
+  );
+
+  // Create a small spherical collider
+  physics.createCollider(
+    R.ColliderDesc.ball(0.1)
+      .setDensity(2.0)
+      .setFriction(0.0)
+      .setRestitution(0.2),
+    rb
+  );
+
+  maps.rb.set(eid, rb);
+  RigidBodyRef.id[eid] = rb.handle;
+  
+  // Release pooled vectors
+  vec3Pool.release(dir);
+  vec3Pool.release(spawn);
+} 
+
+================================================
+File: /src/ecs/systems/projectile.ts
+================================================
+import { defineQuery, removeEntity } from 'bitecs';
+import { Lifespan, Projectile } from '../components';
+import { ECS } from '../world';
+import * as THREE from 'three';
+
+export function initProjectileSystem(_world: ECS) {
+  const projectileQuery = defineQuery([Projectile, Lifespan]);
+  
+  return (w: ECS) => {
+    const now = performance.now();
+    
+    // Create a list of entities to remove to avoid modifying during iteration
+    const entitiesToRemove: number[] = [];
+    
+    // Process bullet lifetimes and handle destruction
+    for (const eid of projectileQuery(w)) {
+      // Skip processing if already marked for removal
+      if (entitiesToRemove.includes(eid)) continue;
+      
+      // Get rigid body reference
+      const rb = w.ctx.maps.rb.get(eid);
+      if (!rb) {
+        // Body reference invalid, mark for removal
+        entitiesToRemove.push(eid);
+        continue;
+      }
+      
+      // Skip if body is no longer valid (prevents "unreachable" errors)
+      try {
+        // Just check if we can access a property - will throw if body is invalid
+        rb.handle;
+      } catch (error) {
+        // Something's wrong with this rigid body, mark for removal
+        console.warn("Invalid rigid body detected, removing entity", eid);
+        entitiesToRemove.push(eid);
+        continue;
+      }
+      
+      // Check if bullet should be removed due to lifetime
+      const expired = now - Lifespan.born[eid] > Lifespan.ttl[eid];
+      
+      // Check if bullet was marked for deletion by collision system
+      const mesh = w.ctx.maps.mesh.get(eid);
+      const markedForDeletion = mesh?.userData?.markedForDeletion === true;
+      
+      // Mark for removal if expired or deletion requested
+      if (expired || markedForDeletion) {
+        entitiesToRemove.push(eid);
+      }
+    }
+    
+    // Remove all entities marked for deletion
+    for (const eid of entitiesToRemove) {
+      // Get and remove the mesh
+      const mesh = w.ctx.maps.mesh.get(eid);
+      if (mesh) {
+        w.ctx.three.scene.remove(mesh);
+        
+        // Properly cast to THREE.Mesh to access geometry and material
+        if (mesh instanceof THREE.Mesh) {
+          if (mesh.geometry) {
+            mesh.geometry.dispose();
+          }
+          
+          if (mesh.material) {
+            // Handle both single and array materials
+            if (Array.isArray(mesh.material)) {
+              mesh.material.forEach(material => {
+                if (material) material.dispose();
+              });
+            } else {
+              mesh.material.dispose();
+            }
+          }
+        }
+        
+        w.ctx.maps.mesh.delete(eid);
+      }
+      
+      // Get and remove the rigid body
+      const rb = w.ctx.maps.rb.get(eid);
+      if (rb) {
+        w.ctx.physics.removeRigidBody(rb);
+        w.ctx.maps.rb.delete(eid);
+      }
+      
+      // Remove the entity
+      removeEntity(w, eid);
+    }
+    
+    return w;
+  };
+}
+
+
+================================================
+File: /src/ecs/systems/renderSync.ts
+================================================
+/**********************************************************************
+ * renderSync.ts – sync Three meshes with Rapier bodies each frame
+ *********************************************************************/
+import { defineQuery, hasComponent, exitQuery } from 'bitecs';
+import { ECS } from '../world';
+import {
+  MeshRef, RigidBodyRef, Transform, Player, Projectile
+} from '../components';
+import { vec3Pool, quatPool, interpolatePositions, interpolateRotations } from '../utils/mathUtils';
+
+export function initRenderSyncSystem(_world: ECS) {
+  const q = defineQuery([MeshRef]);
+  const rbQuery = defineQuery([MeshRef, RigidBodyRef]);
+  
+  // Listen for entity deletions with MeshRef component
+  const exitMeshQuery = exitQuery(q);
+  
+  // Storage for previous physics state for interpolation
+  const prevPositions = new Map<number, THREE.Vector3>();
+  const prevRotations = new Map<number, THREE.Quaternion>();
+
+  return (w: ECS) => {
+    // First, handle entity removal through bitECS exitQuery
+    for (const eid of exitMeshQuery(w)) {
+      // Clean up interpolation data for removed entities
+      prevPositions.delete(eid);
+      prevRotations.delete(eid);
+      
+      // Remove from entity handle map if present
+      if (w.ctx.entityHandleMap) {
+        // Find and remove any entry for this entity ID
+        for (const [handle, entityId] of w.ctx.entityHandleMap.entries()) {
+          if (entityId === eid) {
+            w.ctx.entityHandleMap.delete(handle);
+            break;
+          }
+        }
+      }
+    }
+    
+    // Then handle entities marked for deletion
+    for (const eid of q(w)) {
+      const mesh = w.ctx.maps.mesh.get(eid);
+      if (mesh?.userData?.markedForDeletion) {
+        // Clean up interpolation data only
+        prevPositions.delete(eid);
+        prevRotations.delete(eid);
+      }
+    }
+    
+    // Alpha for interpolation (0.0 to 1.0)
+    const isHighRefreshRate = w.time.dt < 0.01; // Detecting high refresh (>100Hz)
+    const alpha = isHighRefreshRate ? 
+                  // Less interpolation on high refresh for sharper image
+                  Math.min(0.5, w.time.alpha || 0) :
+                  // Standard interpolation on normal refresh
+                  (w.time.alpha !== undefined ? w.time.alpha : 0);
+    
+    // Get reusable vectors/quaternions
+    const currentPos = vec3Pool.get();
+    const currentRot = quatPool.get();
+    
+    for (const eid of rbQuery(w)) {
+      const mesh = w.ctx.maps.mesh.get(eid)!;
+      const rb   = w.ctx.maps.rb.get(eid); 
+      
+      if (!rb) continue;
+
+      // Handle physics-driven objects that aren't the player
+      if (!hasComponent(w, Player, eid)) {
+        const p = rb.translation();
+        const r = rb.rotation();
+        
+        // Set current position/rotation
+        currentPos.set(p.x, p.y, p.z);
+        currentRot.set(r.x, r.y, r.z, r.w);
+        
+        // Initialize previous state on first frame
+        if (!prevPositions.has(eid)) {
+          prevPositions.set(eid, currentPos.clone());
+        }
+        if (!prevRotations.has(eid)) {
+          prevRotations.set(eid, currentRot.clone());
+        }
+        
+        // Get previous state
+        const prevPos = prevPositions.get(eid)!;
+        const prevRot = prevRotations.get(eid)!;
+        
+        // Update previous state only when physics runs
+        if (w.time.shouldRunPhysics) {
+          prevPos.copy(currentPos);
+          prevRot.copy(currentRot);
+        }
+        
+        // On fast-moving objects, reduce interpolation to prevent blur
+        const vel = rb.linvel ? rb.linvel() : null;
+        const isMovingFast = vel && (vel.x*vel.x + vel.y*vel.y + vel.z*vel.z > 100);
+        
+        // Skip interpolation entirely for fast-moving objects (like bullets)
+        // to avoid the quaternion slerp overhead - just use current position directly
+        if (isMovingFast || hasComponent(w, Projectile, eid)) {
+          mesh.position.set(currentPos.x, currentPos.y, currentPos.z);
+          mesh.quaternion.set(currentRot.x, currentRot.y, currentRot.z, currentRot.w);
+        } else {
+          // Standard interpolation for normal objects
+          const objectAlpha = isHighRefreshRate ? 0.3 : alpha;
+          interpolatePositions(mesh.position, prevPos, currentPos, objectAlpha);
+          interpolateRotations(mesh.quaternion, prevRot, currentRot, objectAlpha);
+        }
+        
+        continue;
+      }
+
+      // Handle the player capsule (position only)
+      if (hasComponent(w, Player, eid)) {
+        const p = rb.translation();
+        
+        // Player movement uses same interpolation technique
+        currentPos.set(p.x, p.y, p.z);
+        
+        // Initialize previous state on first frame
+        if (!prevPositions.has(eid)) {
+          prevPositions.set(eid, currentPos.clone());
+        }
+        
+        // Get previous state
+        const prevPos = prevPositions.get(eid)!;
+        
+        // Update previous state only when physics runs
+        if (w.time.shouldRunPhysics) {
+          prevPos.copy(currentPos);
+        }
+        
+        // For player, use minimal interpolation on high refresh rate
+        const playerAlpha = isHighRefreshRate ? Math.min(0.3, alpha) : alpha;
+        
+        // Interpolate player position
+        interpolatePositions(mesh.position, prevPos, currentPos, playerAlpha);
+        continue;
+      }
+    }
+
+    // Handle remaining kinematic meshes - write transform back into ECS 
+    for (const eid of q(w)) {
+      // Skip if it has a rigid body (already processed above)
+      if (hasComponent(w, RigidBodyRef, eid)) continue;
+      
+      const mesh = w.ctx.maps.mesh.get(eid)!;
+      
+      // Use pooled vectors
+      const pos = vec3Pool.get();
+      const quat = quatPool.get();
+      
+      mesh.getWorldPosition(pos);
+      mesh.getWorldQuaternion(quat);
+
+      Transform.x[eid]  = pos.x;
+      Transform.y[eid]  = pos.y;
+      Transform.z[eid]  = pos.z;
+      Transform.qx[eid] = quat.x;
+      Transform.qy[eid] = quat.y;
+      Transform.qz[eid] = quat.z;
+      Transform.qw[eid] = quat.w;
+      
+      // Release pooled vectors
+      vec3Pool.release(pos);
+      quatPool.release(quat);
+    }
+    
+    // Release pooled vectors used for the loop
+    vec3Pool.release(currentPos);
+    quatPool.release(currentRot);
+    
+    return w;
+  };
+}
+
+
+================================================
+File: /src/ecs/systems/timeStep.ts
+================================================
+/**
+ * Time step system that manages fixed time steps for physics
+ */
+import { ECS } from '../world';
+import { updateFixedTimestep } from '../timeUtils';
+import { TimeStepConfig } from '../config';
+
+// Fixed timestep configuration constants are now directly imported from TimeStepConfig
+
+export function initTimeStepSystem(_world: ECS) {
+  return (w: ECS) => {
+    // Calculate delta time in seconds
+    const now = performance.now();
+    // Use a minimum delta time to prevent tiny stutters during fast displays
+    const dt = Math.max(TimeStepConfig.MIN_DT, (now - w.time.then) * 0.001); // Convert ms to seconds
+    w.time.then = now;
+    w.time.dt = dt;
+    
+    // Update fixed timestep values
+    updateFixedTimestep(w, dt);
+    
+    return w;
+  };
+} 
+
+================================================
+File: /src/ecs/timeUtils.ts
+================================================
+/**
+ * Time utilities for managing fixed timestep and frame timing
+ */
+import { ECS } from './world';
+import { TimeStepConfig } from './config';
+
+/**
+ * Update time accumulator and calculate physics steps
+ */
+export function updateFixedTimestep(world: ECS, deltaTime: number): void {
+  // Cap deltaTime to prevent jumps after pauses/tab switches
+  const dt = Math.min(deltaTime, TimeStepConfig.MAX_FRAME_TIME);
+  
+  // Add to accumulator
+  world.time.accumulator += dt;
+  
+  // Calculate how many physics steps to take
+  const steps = Math.floor(world.time.accumulator / TimeStepConfig.FIXED_DT);
+  const clampedSteps = Math.min(steps, TimeStepConfig.MAX_STEPS);
+  
+  // Store in world time
+  world.time.shouldRunPhysics = clampedSteps > 0;
+  world.time.physicsSteps = clampedSteps;
+  world.time.fixedDt = TimeStepConfig.FIXED_DT;
+  
+  // Calculate interpolation alpha
+  if (steps > 0) {
+    world.time.accumulator -= clampedSteps * TimeStepConfig.FIXED_DT;
+    world.time.alpha = world.time.accumulator / TimeStepConfig.FIXED_DT;
+  } else {
+    world.time.alpha = 0;
+  }
+} 
+
+================================================
+File: /src/ecs/utils/eventUtils.ts
+================================================
+/**
+ * Event utility functions for proper listener management
+ */
+
+// Track attached listeners for cleanup
+const attachedListeners: Array<{
+  target: EventTarget;
+  type: string;
+  listener: EventListenerOrEventListenerObject;
+  options?: boolean | AddEventListenerOptions;
+}> = [];
+
+/**
+ * Safely attach an event listener with tracking for easy cleanup
+ * @param target The EventTarget to attach to (window, document, etc.)
+ * @param type Event type (click, keydown, etc.)
+ * @param listener The event listener function
+ * @param options Optional addEventListener options
+ */
+export function safeAddEventListener(
+  target: EventTarget,
+  type: string,
+  listener: EventListenerOrEventListenerObject,
+  options?: boolean | AddEventListenerOptions
+): void {
+  target.addEventListener(type, listener, options);
+  attachedListeners.push({ target, type, listener, options });
+}
+
+/**
+ * Remove all previously attached event listeners
+ */
+export function removeAllEventListeners(): void {
+  for (const { target, type, listener, options } of attachedListeners) {
+    target.removeEventListener(type, listener, options);
+  }
+  attachedListeners.length = 0;
+}
+
+/**
+ * Setup handlers to clean up event listeners on page unload
+ */
+export function setupEventCleanup(): void {
+  // Only set up once
+  if ((window as any).__eventCleanupInitialized) return;
+  
+  window.addEventListener('beforeunload', removeAllEventListeners);
+  (window as any).__eventCleanupInitialized = true;
+} 
+
+================================================
+File: /src/ecs/utils/mathUtils.ts
+================================================
+/**
+ * Math utilities including vector/quaternion pooling
+ */
+import * as THREE from 'three';
+
+// Default pool size configuration
+export const ObjectPoolConfig = {
+  INITIAL_SIZE: 20  // Reduced from 50 to conserve memory
+};
+
+// A simple vector/quaternion pool to avoid allocations
+class ObjectPool<T> {
+  private pool: T[] = [];
+  private createFn: () => T;
+  private resetFn: (obj: T) => void;
+  
+  constructor(createFn: () => T, resetFn: (obj: T) => void, initialSize = ObjectPoolConfig.INITIAL_SIZE) {
+    this.createFn = createFn;
+    this.resetFn = resetFn;
+    
+    // Pre-allocate initial pool
+    for (let i = 0; i < initialSize; i++) {
+      this.pool.push(this.createFn());
+    }
+  }
+  
+  get(): T {
+    if (this.pool.length === 0) {
+      return this.createFn();
+    }
+    return this.pool.pop()!;
+  }
+  
+  release(obj: T): void {
+    this.resetFn(obj);
+    this.pool.push(obj);
+  }
+}
+
+// Vector3 pool
+export const vec3Pool = new ObjectPool<THREE.Vector3>(
+  () => new THREE.Vector3(),
+  (v) => v.set(0, 0, 0)
+);
+
+// Quaternion pool
+export const quatPool = new ObjectPool<THREE.Quaternion>(
+  () => new THREE.Quaternion(),
+  (q) => q.set(0, 0, 0, 1)
+);
+
+// Euler pool
+export const eulerPool = new ObjectPool<THREE.Euler>(
+  () => new THREE.Euler(),
+  (e) => e.set(0, 0, 0)
+);
+
+// Vector2 pool
+export const vec2Pool = new ObjectPool<THREE.Vector2>(
+  () => new THREE.Vector2(),
+  (v) => v.set(0, 0)
+);
+
+// Interpolation helpers
+export function interpolatePositions(
+  dest: THREE.Vector3,
+  prev: THREE.Vector3, 
+  current: THREE.Vector3, 
+  alpha: number
+): THREE.Vector3 {
+  return dest.lerpVectors(prev, current, alpha);
+}
+
+export function interpolateRotations(
+  dest: THREE.Quaternion,
+  prev: THREE.Quaternion, 
+  current: THREE.Quaternion, 
+  alpha: number
+): THREE.Quaternion {
+  return dest.slerpQuaternions(prev, current, alpha);
+}
+
+// Convert numeric tuple to BigInt64 for use as map key
+export function createEntityPairKey(a: number, b: number): bigint {
+  // Ensure a < b to make the key consistent regardless of order
+  if (a > b) [a, b] = [b, a];
+  
+  // Convert to BigInt and combine into single 64-bit value
+  // This allows for efficient storage without string conversions
+  return (BigInt(a) << 32n) | BigInt(b & 0xFFFFFFFF);
+}
+
+/**
+ * Get direction vector from one point to another
+ * @param fromPos Starting position
+ * @param toPos Target position
+ * @param outVec Optional output vector (if not provided, one will be pooled)
+ * @returns Normalized direction vector (caller must vec3Pool.release(outVec) when done)
+ */
+export function directionFromTo(
+  fromPos: { x: number, y: number, z: number },
+  toPos: { x: number, y: number, z: number },
+  outVec = vec3Pool.get()
+): THREE.Vector3 {
+  return outVec.set(
+    toPos.x - fromPos.x,
+    toPos.y - fromPos.y,
+    toPos.z - fromPos.z
+  ).normalize();
+} 
+
+================================================
+File: /src/ecs/world.ts
+================================================
+import { createWorld, pipe } from 'bitecs';
+import { initInputSystem, InputState } from './systems/input.ts';
+import { initPlayerSystem }    from './systems/player';
+import { initProjectileSystem }from './systems/projectile.ts';
+import { initPhysicsSystem }   from './systems/physics.ts';
+import { initRenderSyncSystem }from './systems/renderSync.ts';
+import { initDebugVisSystem }  from './systems/debugVis.ts';
+import { initCollisionSystem } from './systems/collision.ts';
+import { initTimeStepSystem }  from './systems/timeStep.ts';
+import * as THREE from 'three';
+
+// Import Rapier types - use a type-only import to avoid runtime loading
+import type * as RAPIER from '@dimforge/rapier3d';
+
+/** Create ECS world + pipeline */
+export function createECS(ctx: ECSContext) {
+  const world = createWorld() as ECS;
+  world.ctx  = ctx;
+  world.time = { 
+    dt: 0, 
+    then: performance.now(),
+    accumulator: 0
+  };
+  
+  // Create a collision event queue for Rapier
+  const eventQueue = new ctx.rapier.EventQueue(true);
+  world.ctx.eventQueue = eventQueue;
+
+  const pipeline = pipe(
+    initTimeStepSystem(world),  // Run first to manage fixed timestep
+    initInputSystem(world),
+    initPlayerSystem(world),
+    initPhysicsSystem(world),   // Physics runs before collision system to process contacts
+    initCollisionSystem(world), // Now handles Rapier collision events instead of raycasting
+    initProjectileSystem(world),
+    initDebugVisSystem(world),
+    initRenderSyncSystem(world)
+  );
+
+  return { world, pipeline };
+}
+
+/* -------------------------------------------------- */
+/* Types shared with scene & systems                  */
+export interface ECSContext {
+  rapier: typeof RAPIER;
+  physics: RAPIER.World;
+  three: {
+    scene: THREE.Scene;
+    camera: THREE.Camera;
+    renderer: THREE.WebGLRenderer;
+  };
+  maps: {
+    rb: Map<number, RAPIER.RigidBody>;
+    mesh: Map<number, THREE.Object3D>;
+  };
+  eventQueue?: RAPIER.EventQueue; 
+  kcc?: RAPIER.KinematicCharacterController; 
+  playerCollider?: RAPIER.Collider;
+  entityHandleMap?: Map<number, number>; // Map from RB handle to entity ID
+}
+
+export interface ECS {
+  ctx: ECSContext;
+  time: {
+    dt: number;
+    then: number;
+    accumulator: number;
+    fixedDt?: number;
+    alpha?: number;
+    physicsSteps?: number;
+    shouldRunPhysics?: boolean;
+  };
+  input?: InputState;
+}
+
+
+================================================
+File: /src/gameloop.ts
+================================================
+/**
+ * Game loop module for managing main animation loop
+ */
+import Stats from 'three/examples/jsm/libs/stats.module.js';
+import { ECS } from './ecs/world';
+
+/**
+ * Set up stats.js performance monitor
+ */
+export function setupStats(): Stats {
+  const stats = new Stats();
+  stats.showPanel(0); // 0: fps, 1: ms, 2: mb, 3+: custom
+  stats.dom.style.position = 'absolute';
+  stats.dom.style.left = '0px';
+  stats.dom.style.top = '0px';
+  document.body.appendChild(stats.dom);
+  return stats;
+}
+
+/**
+ * Start the game loop
+ */
+export function startGameLoop(world: ECS, pipeline: (w: ECS) => ECS): void {
+  const stats = setupStats();
+  
+  // Start animation loop
+  const raf = (_t: number) => {
+    // Begin stats measurement
+    stats.begin();
+    
+    // Run all systems
+    pipeline(world);
+    
+    // Render the scene
+    world.ctx.three.renderer.render(world.ctx.three.scene, world.ctx.three.camera);
+    
+    // End stats measurement
+    stats.end();
+    
+    // Request next frame
+    requestAnimationFrame(raf);
+  };
+  
+  // Start the loop
+  requestAnimationFrame(raf);
+} 
+
+================================================
+File: /src/main.ts
+================================================
+import * as RAPIER from '@dimforge/rapier3d';
+import { createContext, populateScene } from './ecs/scene';
+import { createECS } from './ecs/world';
+import { startGameLoop } from './gameloop';
+
+/* canvas declared in /index.html */
+const canvas = document.getElementById('c') as HTMLCanvasElement;
+
+/**
+ * Main application entry point
+ */
+async function main() {
+  /* bootstrap Three + Rapier context (physics world still empty) */
+  const ctx = await createContext(canvas, RAPIER);
+
+  /* create ECS world & system pipeline */
+  const { world, pipeline } = createECS(ctx);
+
+  /* now that ECS exists, spawn cubes & any other scene content */
+  populateScene(world, ctx);
+  
+  /* Start the game loop */
+  startGameLoop(world, pipeline);
+}
+
+// Initialize the application
+main().catch(console.error);
+
+
+================================================
+File: /tsconfig.json
+================================================
+{
+    "compilerOptions": {
+      "target": "ES2020",
+      "module": "ESNext",
+      "lib": ["ES2020", "DOM"],
+      "moduleResolution": "Bundler",
+      "strict": true,
+      "noImplicitReturns": true,
+      "noUnusedLocals": true,
+      "noUnusedParameters": true,
+      "skipLibCheck": true,
+      "allowImportingTsExtensions": true,
+      "noEmit": true,
+      "types": ["vite/client"]
+    },
+    "include": ["src"]
+  }
+  
+
+================================================
+File: /vite.config.ts
+================================================
+import { defineConfig } from 'vite';
+import wasm from 'vite-plugin-wasm';
+import topLevelAwait from 'vite-plugin-top-level-await';
+
+export default defineConfig({
+  plugins: [wasm(), topLevelAwait()],
+  build: { target: 'esnext' },
+  server: { host: true }
+});
+    </codebase>
+</context>
