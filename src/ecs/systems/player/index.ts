@@ -11,6 +11,7 @@ import { MovementState } from '../../config';
 import { initPlayerMovementSystem } from './movementSystem';
 import { initPlayerLookSystem } from './lookSystem';
 import { initPlayerShootSystem } from './shootSystem';
+import { initPlayerAnimationSystem } from './animationSystem';
 
 export function initPlayerSystem(world: ECS) {
   const { rapier, physics, three, maps } = world.ctx;
@@ -35,9 +36,14 @@ export function initPlayerSystem(world: ECS) {
 
   const holder = new THREE.Object3D();
   holder.position.set(0, 3, 6);
-  holder.add(three.camera);
   three.scene.add(holder);
   maps.mesh.set(pid, holder);
+
+  // Position the camera in the holder
+  const cameraOffset = new THREE.Object3D();
+  cameraOffset.position.set(0, 1.6, 0); // Eye height of ~1.6m
+  holder.add(cameraOffset);
+  cameraOffset.add(three.camera);
 
   /* Rapier kinematic capsule --------------------------------------- */
   const rb = physics.createRigidBody(
@@ -66,6 +72,7 @@ export function initPlayerSystem(world: ECS) {
   const movementSystem = initPlayerMovementSystem(world);
   const lookSystem = initPlayerLookSystem(world);
   const shootSystem = initPlayerShootSystem(world);
+  const animationSystem = initPlayerAnimationSystem(world);
 
   /* Combined system ------------------------------------------------- */
   return (w: ECS) => {
@@ -73,6 +80,7 @@ export function initPlayerSystem(world: ECS) {
     lookSystem(w);
     movementSystem(w);
     shootSystem(w);
+    animationSystem(w);
     
     return w;
   };

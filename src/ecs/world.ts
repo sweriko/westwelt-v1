@@ -72,6 +72,7 @@ export interface ECS {
     alpha?: number;
     physicsSteps?: number;
     shouldRunPhysics?: boolean;
+    prevPlayerPos?: THREE.Vector3; // Store previous player position for animation
   };
   input?: InputState;
 }
