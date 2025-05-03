@@ -1,116 +1,105 @@
-/**
- * Player shooting system - handles weapon firing
- */
-import { addComponent, addEntity, defineQuery } from 'bitecs';
+import { defineQuery, hasComponent, addEntity, addComponent } from 'bitecs';
 import * as THREE from 'three';
-import { Player, FPController, Projectile, Lifespan, Velocity, MeshRef, RigidBodyRef, Transform } from '../../components';
+import { LocalPlayer, FPController, Transform, Projectile, Lifespan, MeshRef, Velocity } from '../../components'; // Import required components
 import { ECS } from '../../world';
 import { InputState } from '../input';
-import { vec3Pool } from '../../utils/mathUtils';
+import { network } from '../network/client'; // Import network client
 import { WeaponConfig } from '../../config';
+import { vec3Pool } from '../../utils/mathUtils'; // Keep for direction calculation
+
+// Removed playerQuery, system now receives eid
+// const playerQuery = defineQuery([LocalPlayer, FPController]);
+
+// Server now dictates shoot cooldown, remove client-side tracking?
+// Keeping prevShoot for detecting button press vs hold
+let prevShoot = false;
+let lastShotTime = 0; // Use a local timestamp for basic client-side feedback delay if needed
 
 export function initPlayerShootSystem(_world: ECS) {
-  const playerQuery = defineQuery([Player, FPController]);
-  
-  // Track the previous shoot state to detect start of shooting
-  let prevShoot = false;
 
-  return (w: ECS) => {
-    const input = w.input as InputState;
-    // Input check removed - initInputSystem is guaranteed to run first
-    
-    const now = performance.now();
-    
-    for (const eid of playerQuery(w)) {
-      // Detect shoot button pressed (not held)
-      const shootStart = input.shoot && !prevShoot;
-      
-      if (shootStart && now - FPController.lastShot[eid] > WeaponConfig.SHOOT_CD_MS) {
-        spawnBullet(w, w.ctx.three.camera, w.ctx.rapier);
-        FPController.lastShot[eid] = now;
-      }
-    }
-    
-    // Store shoot state for next frame
-    prevShoot = input.shoot;
-    
-    return w;
-  };
+    // System now receives world and the specific local player eid
+    return (w: ECS, eid: number) => {
+        const input = w.input as InputState;
+        if (!input) return w;
+
+        const now = performance.now();
+
+        // --- Process only the local player entity 'eid' ---
+        const shootStart = input.shoot && !prevShoot;
+
+        // Simple client-side cooldown visual feedback (optional, server is authoritative)
+        const clientSideCooldown = 200; // ms, match WeaponConfig? Or make slightly shorter
+        if (shootStart && now - lastShotTime > clientSideCooldown) {
+             // Get camera for shoot direction
+            const camera = w.ctx.three.camera;
+            if (!camera) return w; // Should not happen
+
+            // Get direction and spawn position
+            const dir = vec3Pool.get();
+            const spawnPos = vec3Pool.get();
+
+            camera.getWorldDirection(dir).normalize();
+            // Spawn slightly in front of camera, aligned with view
+            camera.getWorldPosition(spawnPos).addScaledVector(dir, WeaponConfig.BULLET_SPAWN_DISTANCE);
+
+
+            console.log(`Local player ${w.ctx.localPlayerId} shooting.`);
+            // Send shoot message to the server
+            network.send({
+                type: 'shoot',
+                position: { x: spawnPos.x, y: spawnPos.y, z: spawnPos.z },
+                direction: { x: dir.x, y: dir.y, z: dir.z }
+            });
+
+            // --- Spawn Local Projectile ---
+            // Create a real projectile with physics and proper lifetime
+            spawnProjectile(w, spawnPos, dir);
+
+            lastShotTime = now; // Update client-side timer
+
+            vec3Pool.release(dir);
+            vec3Pool.release(spawnPos);
+        }
+
+        prevShoot = input.shoot;
+
+        return w;
+    };
 }
 
-/* bullet helper ---------------------------------------------------- */
-function spawnBullet(
-  w: ECS, camera: THREE.Camera,
-  R: typeof import('@dimforge/rapier3d-compat')
-) {
-  const { physics, maps } = w.ctx;
 
-  const eid = addEntity(w);
-  addComponent(w, Projectile,   eid);
-  addComponent(w, Lifespan,     eid);
-  addComponent(w, RigidBodyRef, eid);
-  addComponent(w, MeshRef,      eid);
-  addComponent(w, Transform,    eid);
-  // Velocity component is for future client-side prediction
-  addComponent(w, Velocity,     eid);
-
-  Lifespan.ttl[eid]  = WeaponConfig.BULLET_TTL_MS;
-  Lifespan.born[eid] = performance.now();
-
-  /* mesh */
-  const mesh = new THREE.Mesh(
-    new THREE.SphereGeometry(0.1, 8, 8),
-    new THREE.MeshStandardMaterial({
-      color: 0xff9900, roughness: 0.3, metalness: 0.7,
-      emissive: 0xff9900, emissiveIntensity: 0.5
-    })
-  );
-  mesh.castShadow = true;
-
-  // Get direction from camera (reuse vectors)
-  const dir = vec3Pool.get();
-  camera.getWorldDirection(dir).normalize();
-  
-  // Get spawn position (reuse vectors)
-  const spawn = vec3Pool.get();
-  camera.getWorldPosition(spawn).addScaledVector(dir, WeaponConfig.BULLET_SPAWN_DISTANCE);
-  
-  // Apply to mesh
-  mesh.position.copy(spawn);
-
-  // Add to scene
-  w.ctx.three.scene.add(mesh);
-  maps.mesh.set(eid, mesh);
-
-  /* rigid body */
-  // Store velocity for client-side prediction
-  Velocity.x[eid] = dir.x * WeaponConfig.BULLET_SPEED;
-  Velocity.y[eid] = dir.y * WeaponConfig.BULLET_SPEED;
-  Velocity.z[eid] = dir.z * WeaponConfig.BULLET_SPEED;
-
-  // Create a rigid body with CCD enabled to prevent tunneling at high speeds
-  const rb = physics.createRigidBody(
-    R.RigidBodyDesc.dynamic()
-      .setTranslation(spawn.x, spawn.y, spawn.z)
-      .setCcdEnabled(true)
-      .setLinvel(dir.x * WeaponConfig.BULLET_SPEED, 
-                dir.y * WeaponConfig.BULLET_SPEED, 
-                dir.z * WeaponConfig.BULLET_SPEED)
-  );
-
-  // Create a small spherical collider
-  physics.createCollider(
-    R.ColliderDesc.ball(0.1)
-      .setDensity(2.0)
-      .setFriction(0.0)
-      .setRestitution(0.2),
-    rb
-  );
-
-  maps.rb.set(eid, rb);
-  RigidBodyRef.id[eid] = rb.handle;
-  
-  // Release pooled vectors
-  vec3Pool.release(dir);
-  vec3Pool.release(spawn);
-} 
+// Helper to spawn a real projectile with physics
+function spawnProjectile(world: ECS, position: THREE.Vector3, direction: THREE.Vector3) {
+    const eid = addEntity(world);
+    addComponent(world, Projectile, eid);
+    addComponent(world, Lifespan, eid);
+    addComponent(world, MeshRef, eid);
+    addComponent(world, Transform, eid);
+    addComponent(world, Velocity, eid);
+    
+    // Setup lifespan
+    Lifespan.ttl[eid] = WeaponConfig.BULLET_TTL_MS;
+    Lifespan.born[eid] = performance.now();
+    
+    // Setup transform
+    Transform.x[eid] = position.x;
+    Transform.y[eid] = position.y;
+    Transform.z[eid] = position.z;
+    Transform.qx[eid] = 0; Transform.qy[eid] = 0; Transform.qz[eid] = 0; Transform.qw[eid] = 1;
+    
+    // Setup velocity
+    Velocity.x[eid] = direction.x * WeaponConfig.BULLET_SPEED;
+    Velocity.y[eid] = direction.y * WeaponConfig.BULLET_SPEED;
+    Velocity.z[eid] = direction.z * WeaponConfig.BULLET_SPEED;
+    
+    // Create visual mesh
+    const mesh = new THREE.Mesh(
+        new THREE.SphereGeometry(0.08, 8, 8),
+        new THREE.MeshBasicMaterial({ color: 0xff4400 })
+    );
+    mesh.position.copy(position);
+    world.ctx.three.scene.add(mesh);
+    world.ctx.maps.mesh.set(eid, mesh);
+    
+    return eid;
+}

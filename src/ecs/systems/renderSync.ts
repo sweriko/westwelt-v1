@@ -1,177 +1,143 @@
-/**********************************************************************
- * renderSync.ts – sync Three meshes with Rapier bodies each frame
- *********************************************************************/
 import { defineQuery, hasComponent, exitQuery } from 'bitecs';
 import { ECS } from '../world';
 import {
-  MeshRef, RigidBodyRef, Transform, Player, Projectile
+  MeshRef, RigidBodyRef, Transform, LocalPlayer, RemotePlayer, InterpolationTarget // Added RemotePlayer, InterpolationTarget
 } from '../components';
 import { vec3Pool, quatPool, interpolatePositions, interpolateRotations } from '../utils/mathUtils';
+import * as THREE from 'three'; // Import THREE
 
 export function initRenderSyncSystem(_world: ECS) {
-  const q = defineQuery([MeshRef]);
-  const rbQuery = defineQuery([MeshRef, RigidBodyRef]);
-  
-  // Listen for entity deletions with MeshRef component
-  const exitMeshQuery = exitQuery(q);
-  
-  // Storage for previous physics state for interpolation
-  const prevPositions = new Map<number, THREE.Vector3>();
-  const prevRotations = new Map<number, THREE.Quaternion>();
+    const localPlayerQuery = defineQuery([LocalPlayer, MeshRef, RigidBodyRef]);
+    const remotePlayerQuery = defineQuery([RemotePlayer, MeshRef, InterpolationTarget, Transform]); // Remote players use InterpolationTarget & Transform
+    const otherRbQuery = defineQuery([MeshRef, RigidBodyRef]); // Query for non-player rigid bodies
+    const allMeshQuery = defineQuery([MeshRef]); // For cleanup
 
-  return (w: ECS) => {
-    // First, handle entity removal through bitECS exitQuery
-    for (const eid of exitMeshQuery(w)) {
-      // Clean up interpolation data for removed entities
-      prevPositions.delete(eid);
-      prevRotations.delete(eid);
-      
-      // Remove from entity handle map if present
-      if (w.ctx.entityHandleMap) {
-        // Find and remove any entry for this entity ID
-        for (const [handle, entityId] of w.ctx.entityHandleMap.entries()) {
-          if (entityId === eid) {
-            w.ctx.entityHandleMap.delete(handle);
-            break;
-          }
-        }
-      }
-    }
-    
-    // Then handle entities marked for deletion
-    for (const eid of q(w)) {
-      const mesh = w.ctx.maps.mesh.get(eid);
-      if (mesh?.userData?.markedForDeletion) {
-        // Clean up interpolation data only
-        prevPositions.delete(eid);
-        prevRotations.delete(eid);
-      }
-    }
-    
-    // Alpha for interpolation (0.0 to 1.0)
-    const isHighRefreshRate = w.time.dt < 0.01; // Detecting high refresh (>100Hz)
-    const alpha = isHighRefreshRate ? 
-                  // Less interpolation on high refresh for sharper image
-                  Math.min(0.5, w.time.alpha || 0) :
-                  // Standard interpolation on normal refresh
-                  (w.time.alpha !== undefined ? w.time.alpha : 0);
-    
-    // Get reusable vectors/quaternions
-    const currentPos = vec3Pool.get();
-    const currentRot = quatPool.get();
-    
-    for (const eid of rbQuery(w)) {
-      const mesh = w.ctx.maps.mesh.get(eid)!;
-      const rb   = w.ctx.maps.rb.get(eid); 
-      
-      if (!rb) continue;
+    const exitMeshQuery = exitQuery(allMeshQuery);
 
-      // Handle physics-driven objects that aren't the player
-      if (!hasComponent(w, Player, eid)) {
-        const p = rb.translation();
-        const r = rb.rotation();
-        
-        // Set current position/rotation
-        currentPos.set(p.x, p.y, p.z);
-        currentRot.set(r.x, r.y, r.z, r.w);
-        
-        // Initialize previous state on first frame
-        if (!prevPositions.has(eid)) {
-          prevPositions.set(eid, currentPos.clone());
-        }
-        if (!prevRotations.has(eid)) {
-          prevRotations.set(eid, currentRot.clone());
-        }
-        
-        // Get previous state
-        const prevPos = prevPositions.get(eid)!;
-        const prevRot = prevRotations.get(eid)!;
-        
-        // Update previous state only when physics runs
-        if (w.time.shouldRunPhysics) {
-          prevPos.copy(currentPos);
-          prevRot.copy(currentRot);
-        }
-        
-        // On fast-moving objects, reduce interpolation to prevent blur
-        const vel = rb.linvel ? rb.linvel() : null;
-        const isMovingFast = vel && (vel.x*vel.x + vel.y*vel.y + vel.z*vel.z > 100);
-        
-        // Skip interpolation entirely for fast-moving objects (like bullets)
-        // to avoid the quaternion slerp overhead - just use current position directly
-        if (isMovingFast || hasComponent(w, Projectile, eid)) {
-          mesh.position.set(currentPos.x, currentPos.y, currentPos.z);
-          mesh.quaternion.set(currentRot.x, currentRot.y, currentRot.z, currentRot.w);
-        } else {
-          // Standard interpolation for normal objects
-          const objectAlpha = isHighRefreshRate ? 0.3 : alpha;
-          interpolatePositions(mesh.position, prevPos, currentPos, objectAlpha);
-          interpolateRotations(mesh.quaternion, prevRot, currentRot, objectAlpha);
-        }
-        
-        continue;
-      }
+    // Storage for interpolation - keyed by Entity ID
+    const interpolationData = new Map<number, {
+        prevPos: THREE.Vector3;
+        prevRot: THREE.Quaternion;
+        prevTimestamp: number;
+    }>();
 
-      // Handle the player capsule (position only)
-      if (hasComponent(w, Player, eid)) {
-        const p = rb.translation();
-        
-        // Player movement uses same interpolation technique
-        currentPos.set(p.x, p.y, p.z);
-        
-        // Initialize previous state on first frame
-        if (!prevPositions.has(eid)) {
-          prevPositions.set(eid, currentPos.clone());
-        }
-        
-        // Get previous state
-        const prevPos = prevPositions.get(eid)!;
-        
-        // Update previous state only when physics runs
-        if (w.time.shouldRunPhysics) {
-          prevPos.copy(currentPos);
-        }
-        
-        // For player, use minimal interpolation on high refresh rate
-        const playerAlpha = isHighRefreshRate ? Math.min(0.3, alpha) : alpha;
-        
-        // Interpolate player position
-        interpolatePositions(mesh.position, prevPos, currentPos, playerAlpha);
-        continue;
-      }
-    }
+    // Reusable THREE objects
+    const currentPos = new THREE.Vector3();
+    const currentRot = new THREE.Quaternion();
+    const targetPos = new THREE.Vector3();
+    const targetRot = new THREE.Quaternion();
 
-    // Handle remaining kinematic meshes - write transform back into ECS 
-    for (const eid of q(w)) {
-      // Skip if it has a rigid body (already processed above)
-      if (hasComponent(w, RigidBodyRef, eid)) continue;
-      
-      const mesh = w.ctx.maps.mesh.get(eid)!;
-      
-      // Use pooled vectors
-      const pos = vec3Pool.get();
-      const quat = quatPool.get();
-      
-      mesh.getWorldPosition(pos);
-      mesh.getWorldQuaternion(quat);
 
-      Transform.x[eid]  = pos.x;
-      Transform.y[eid]  = pos.y;
-      Transform.z[eid]  = pos.z;
-      Transform.qx[eid] = quat.x;
-      Transform.qy[eid] = quat.y;
-      Transform.qz[eid] = quat.z;
-      Transform.qw[eid] = quat.w;
-      
-      // Release pooled vectors
-      vec3Pool.release(pos);
-      quatPool.release(quat);
-    }
-    
-    // Release pooled vectors used for the loop
-    vec3Pool.release(currentPos);
-    quatPool.release(currentRot);
-    
-    return w;
-  };
+    return (w: ECS) => {
+        const now = Date.now(); // Current render time
+
+        // --- Cleanup exited entities ---
+        for (const eid of exitMeshQuery(w)) {
+            interpolationData.delete(eid);
+            // Note: Mesh and RB removal is handled elsewhere (e.g., projectileSystem, networkSystem)
+        }
+
+        // --- Sync Local Player ---
+        // Local player's visual mesh should follow the *kinematic* rigid body
+        const localPlayers = localPlayerQuery(w);
+        if (localPlayers.length > 0) {
+            const eid = localPlayers[0];
+            const mesh = w.ctx.maps.mesh.get(eid)!;
+            const rb = w.ctx.maps.rb.get(eid);
+            if (mesh && rb) {
+                 // Get the *current* (potentially interpolated by Rapier) kinematic position
+                 const p = rb.translation();
+                 // Rotation comes from the Transform component updated by look system
+                 const r = { x: Transform.qx[eid], y: Transform.qy[eid], z: Transform.qz[eid], w: Transform.qw[eid] };
+
+                 mesh.position.set(p.x, p.y, p.z);
+                 mesh.quaternion.set(r.x, r.y, r.z, r.w);
+            }
+        }
+
+
+        // --- Sync and Interpolate Remote Players ---
+        const remoteEntities = remotePlayerQuery(w);
+        for (const eid of remoteEntities) {
+            const mesh = w.ctx.maps.mesh.get(eid)!;
+            if (!mesh) continue;
+
+            // Get target state from InterpolationTarget component
+            targetPos.set(InterpolationTarget.targetX[eid], InterpolationTarget.targetY[eid], InterpolationTarget.targetZ[eid]);
+            targetRot.set(InterpolationTarget.targetQX[eid], InterpolationTarget.targetQY[eid], InterpolationTarget.targetQZ[eid], InterpolationTarget.targetQW[eid]);
+            const targetTimestamp = InterpolationTarget.timestamp[eid];
+
+             // Get current state from Transform component (this is the *visual* state)
+             currentPos.set(Transform.x[eid], Transform.y[eid], Transform.z[eid]);
+             currentRot.set(Transform.qx[eid], Transform.qy[eid], Transform.qz[eid], Transform.qw[eid]);
+
+
+            // Simple Lerp for now - replace with time-based interpolation later
+            const lerpFactor = 0.2; // Adjust for smoothness
+            currentPos.lerp(targetPos, lerpFactor);
+            currentRot.slerp(targetRot, lerpFactor);
+
+
+            // Update the Transform component with the interpolated visual state
+            Transform.x[eid] = currentPos.x;
+            Transform.y[eid] = currentPos.y;
+            Transform.z[eid] = currentPos.z;
+            Transform.qx[eid] = currentRot.x;
+            Transform.qy[eid] = currentRot.y;
+            Transform.qz[eid] = currentRot.z;
+            Transform.qw[eid] = currentRot.w;
+
+            // Apply interpolated state to the mesh
+            mesh.position.copy(currentPos);
+            mesh.quaternion.copy(currentRot);
+
+             // Update animation mixer if it exists on the mesh
+             const animData = mesh.userData; // Assuming mixer is stored in userData
+             if (animData?.mixer) {
+                 animData.mixer.update(w.time.dt);
+             }
+        }
+
+
+        // --- Sync Other Rigid Bodies (Cubes, etc.) ---
+        const otherRbEntities = otherRbQuery(w);
+        for (const eid of otherRbEntities) {
+            // Skip if it's a player (handled above)
+            if (hasComponent(w, LocalPlayer, eid) || hasComponent(w, RemotePlayer, eid)) continue;
+
+            const mesh = w.ctx.maps.mesh.get(eid)!;
+            const rb = w.ctx.maps.rb.get(eid);
+            if (!mesh || !rb) continue;
+
+             // Read directly from Rapier body for dynamic objects
+             const p = rb.translation();
+             const r = rb.rotation();
+
+             // Apply directly to mesh (or use interpolation if desired)
+             mesh.position.set(p.x, p.y, p.z);
+             mesh.quaternion.set(r.x, r.y, r.z, r.w);
+
+             // Update Transform component for consistency (optional for non-player RB)
+             Transform.x[eid] = p.x; Transform.y[eid] = p.y; Transform.z[eid] = p.z;
+             Transform.qx[eid] = r.x; Transform.qy[eid] = r.y; Transform.qz[eid] = r.z; Transform.qw[eid] = r.w;
+        }
+
+        // --- Update Transform for non-RB Meshes (if any) ---
+         // This part remains the same as before, handling meshes without RBs
+         for (const eid of allMeshQuery(w)) {
+             if (hasComponent(w, RigidBodyRef, eid) || hasComponent(w, LocalPlayer, eid) || hasComponent(w, RemotePlayer, eid)) continue;
+
+             const mesh = w.ctx.maps.mesh.get(eid)!;
+             if (!mesh) continue;
+
+             mesh.getWorldPosition(currentPos);
+             mesh.getWorldQuaternion(currentRot);
+
+             Transform.x[eid] = currentPos.x; Transform.y[eid] = currentPos.y; Transform.z[eid] = currentPos.z;
+             Transform.qx[eid] = currentRot.x; Transform.qy[eid] = currentRot.y; Transform.qz[eid] = currentRot.z; Transform.qw[eid] = currentRot.w;
+         }
+
+
+        return w;
+    };
 }

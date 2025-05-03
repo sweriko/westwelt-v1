@@ -8,7 +8,7 @@ fi
 
 # Run gitingest to generate digest.txt
 echo "Running..."
-gitingest . --exclude-pattern ingest.sh --exclude-pattern editor.html --exclude-pattern preview.html 
+gitingest . --exclude-pattern ingest.sh --exclude-pattern editor.html --exclude-pattern preview.html --exclude-pattern digestold.txt
 
 # Wait a moment to ensure digest.txt is created
 sleep 0.1

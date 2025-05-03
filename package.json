@@ -1,21 +1,24 @@
 {
-  "name": "rapier-three-bitecs-starter",
+  "name": "rapier-three-bitecs-multiplayer",
   "version": "0.1.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "server": "node server/server.js"
   },
   "dependencies": {
     "@dimforge/rapier3d-compat": "^0.16.1",
     "bitecs": "^0.3.40",
-    "three": "^0.176.0"
+    "three": "^0.176.0",
+    "ws": "^8.18.0"
   },
   "devDependencies": {
-    "@types/three": "^0.158.0",
-    "typescript": "^5.2.2",
-    "vite": "^6.3.1",
+    "@types/three": "^0.167.2",
+    "@types/ws": "^8.5.11",
+    "typescript": "^5.5.4",
+    "vite": "^5.3.5",
     "vite-plugin-top-level-await": "^1.5.0",
     "vite-plugin-wasm": "^3.4.1"
   }
