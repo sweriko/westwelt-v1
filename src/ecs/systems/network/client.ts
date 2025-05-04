@@ -388,7 +388,7 @@ export function initNetworkSystem(world: ECS) {
                     position: { x: Transform.x[eid], y: Transform.y[eid], z: Transform.z[eid] },
                     rotation: { x: Transform.qx[eid], y: Transform.qy[eid], z: Transform.qz[eid], w: Transform.qw[eid] },
                     animationState: AnimationState.state[eid],
-                    health: Health.current[eid], // Include health
+                    health: Health.current[eid]
                 };
 
                 network.send({ type: 'playerUpdate', state: currentState });
@@ -398,9 +398,11 @@ export function initNetworkSystem(world: ECS) {
 
         // --- Interpolate Remote Players ---
         const remoteEntities = remotePlayerQuery(w);
-        const renderTime = now - NetworkConfig.INTERPOLATION_DELAY_MS; // Target time for rendering
+        // Use a fixed delay for interpolation between server updates
+        const renderTime = now - NetworkConfig.INTERPOLATION_DELAY_MS;
 
         for (const eid of remoteEntities) {
+            // Get the target state from InterpolationTarget component
             const currentTimestamp = InterpolationTarget.timestamp[eid];
             const targetX = InterpolationTarget.targetX[eid];
             const targetY = InterpolationTarget.targetY[eid];
@@ -410,9 +412,10 @@ export function initNetworkSystem(world: ECS) {
             const targetQZ = InterpolationTarget.targetQZ[eid];
             const targetQW = InterpolationTarget.targetQW[eid];
 
-            // Very simple interpolation: Move halfway towards the target each frame
-            const lerpFactor = 0.2; // Adjust this for smoothness
+            // Smooth interpolation factor - adjust this based on network conditions
+            const lerpFactor = 0.1; // Reduced from 0.2 for smoother movement
 
+            // Update position with interpolation
             Transform.x[eid] += (targetX - Transform.x[eid]) * lerpFactor;
             Transform.y[eid] += (targetY - Transform.y[eid]) * lerpFactor;
             Transform.z[eid] += (targetZ - Transform.z[eid]) * lerpFactor;
@@ -420,12 +423,18 @@ export function initNetworkSystem(world: ECS) {
             // Use Quaternion slerp for smoother rotation interpolation
             const currentQuat = new THREE.Quaternion(Transform.qx[eid], Transform.qy[eid], Transform.qz[eid], Transform.qw[eid]);
             const targetQuat = new THREE.Quaternion(targetQX, targetQY, targetQZ, targetQW);
-            currentQuat.slerp(targetQuat, lerpFactor);
+            
+            // Use a smaller factor for rotation to avoid jittering
+            const rotLerpFactor = 0.08; // Slower rotation interpolation
+            currentQuat.slerp(targetQuat, rotLerpFactor);
 
             Transform.qx[eid] = currentQuat.x;
             Transform.qy[eid] = currentQuat.y;
             Transform.qz[eid] = currentQuat.z;
             Transform.qw[eid] = currentQuat.w;
+            
+            // Optional: Update the mesh directly here if needed
+            // But generally this should be handled by renderSync
         }
 
         // --- Handle Player Model Loading for New Remote Players ---

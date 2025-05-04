@@ -19,8 +19,8 @@ export function initPlayerSystem(world: ECS) {
   /* entity + mesh holder ------------------------------------------- */
   const pid = addEntity(world);
   addComponent(world, Player,       pid);
-  addComponent(world, LocalPlayer,  pid); // Add LocalPlayer for network compatibility
-  addComponent(world, NetworkId,    pid); // Add NetworkId for multiplayer
+  addComponent(world, LocalPlayer,  pid); // Local player for network compatibility
+  addComponent(world, NetworkId,    pid); // NetworkId for multiplayer
   addComponent(world, Transform,    pid);
   addComponent(world, MeshRef,      pid);
   addComponent(world, RigidBodyRef, pid);
@@ -28,7 +28,7 @@ export function initPlayerSystem(world: ECS) {
   addComponent(world, Health,       pid);
   addComponent(world, AnimationState, pid);
   
-  // Set default values for networked components
+  // Initialize network components
   NetworkId.id[pid] = 0; // Will be set by server
   Health.current[pid] = PlayerConfig.MAX_HEALTH;
   Health.max[pid] = PlayerConfig.MAX_HEALTH;
@@ -44,6 +44,7 @@ export function initPlayerSystem(world: ECS) {
   FPController.jumpRequested[pid] = 0;
   FPController.lastJumpRequest[pid] = 0;
 
+  // Create mesh holder
   const holder = new THREE.Object3D();
   holder.position.set(0, 3, 6);
   three.scene.add(holder);
@@ -54,6 +55,14 @@ export function initPlayerSystem(world: ECS) {
   cameraOffset.position.set(0, 1.6, 0); // Eye height of ~1.6m
   holder.add(cameraOffset);
   cameraOffset.add(three.camera);
+
+  // Initialize Quaternion in Transform component
+  const quaternion = new THREE.Quaternion();
+  holder.getWorldQuaternion(quaternion);
+  Transform.qx[pid] = quaternion.x;
+  Transform.qy[pid] = quaternion.y;
+  Transform.qz[pid] = quaternion.z;
+  Transform.qw[pid] = quaternion.w;
 
   /* Rapier kinematic capsule --------------------------------------- */
   const rb = physics.createRigidBody(
@@ -94,10 +103,15 @@ export function initPlayerSystem(world: ECS) {
 
   /* Combined system ------------------------------------------------- */
   return (w: ECS) => {
-    // Run all sub-systems in sequence
-    lookSystem(w);
-    movementSystem(w);
-    shootSystem(w);
+    // Ensure the correct order of system evaluation:
+    // 1. Look system (camera rotation)
+    // 2. Movement system (uses rotation for movement direction)
+    // 3. Shoot system (uses camera direction)
+    // 4. Animation system (based on movement state)
+    
+    lookSystem(w);     // Handle camera rotation first
+    movementSystem(w); // Apply movement based on new rotation
+    shootSystem(w);    // Handle shooting based on camera direction
     animationSystem(w);
     
     return w;

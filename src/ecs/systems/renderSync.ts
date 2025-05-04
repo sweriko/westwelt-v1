@@ -1,13 +1,13 @@
 import { defineQuery, hasComponent, exitQuery } from 'bitecs';
 import { ECS } from '../world';
 import {
-  MeshRef, RigidBodyRef, Transform, LocalPlayer, RemotePlayer, InterpolationTarget // Added RemotePlayer, InterpolationTarget
+  MeshRef, RigidBodyRef, Transform, LocalPlayer, RemotePlayer, InterpolationTarget, Player, FPController
 } from '../components';
 import { vec3Pool, quatPool, interpolatePositions, interpolateRotations } from '../utils/mathUtils';
 import * as THREE from 'three'; // Import THREE
 
 export function initRenderSyncSystem(_world: ECS) {
-    const localPlayerQuery = defineQuery([LocalPlayer, MeshRef, RigidBodyRef]);
+    const localPlayerQuery = defineQuery([LocalPlayer, MeshRef, RigidBodyRef, Transform, FPController]);
     const remotePlayerQuery = defineQuery([RemotePlayer, MeshRef, InterpolationTarget, Transform]); // Remote players use InterpolationTarget & Transform
     const otherRbQuery = defineQuery([MeshRef, RigidBodyRef]); // Query for non-player rigid bodies
     const allMeshQuery = defineQuery([MeshRef]); // For cleanup
@@ -45,13 +45,20 @@ export function initRenderSyncSystem(_world: ECS) {
             const mesh = w.ctx.maps.mesh.get(eid)!;
             const rb = w.ctx.maps.rb.get(eid);
             if (mesh && rb) {
-                 // Get the *current* (potentially interpolated by Rapier) kinematic position
+                 // Get current physics translation (position)
                  const p = rb.translation();
-                 // Rotation comes from the Transform component updated by look system
-                 const r = { x: Transform.qx[eid], y: Transform.qy[eid], z: Transform.qz[eid], w: Transform.qw[eid] };
-
+                 
+                 // CRITICAL FIX: Only update the position from physics
+                 // Do NOT update the rotation - lookSystem handles this
                  mesh.position.set(p.x, p.y, p.z);
-                 mesh.quaternion.set(r.x, r.y, r.z, r.w);
+                 
+                 // Update Transform position components
+                 Transform.x[eid] = p.x;
+                 Transform.y[eid] = p.y;
+                 Transform.z[eid] = p.z;
+                 
+                 // Transform rotation components should be updated by lookSystem
+                 // DO NOT update Transform rotation components here
             }
         }
 
@@ -75,7 +82,10 @@ export function initRenderSyncSystem(_world: ECS) {
             // Simple Lerp for now - replace with time-based interpolation later
             const lerpFactor = 0.2; // Adjust for smoothness
             currentPos.lerp(targetPos, lerpFactor);
-            currentRot.slerp(targetRot, lerpFactor);
+            
+            // Use slower slerp for rotation to avoid jitter
+            const rotLerpFactor = 0.15;
+            currentRot.slerp(targetRot, rotLerpFactor);
 
 
             // Update the Transform component with the interpolated visual state
@@ -103,7 +113,7 @@ export function initRenderSyncSystem(_world: ECS) {
         const otherRbEntities = otherRbQuery(w);
         for (const eid of otherRbEntities) {
             // Skip if it's a player (handled above)
-            if (hasComponent(w, LocalPlayer, eid) || hasComponent(w, RemotePlayer, eid)) continue;
+            if (hasComponent(w, LocalPlayer, eid) || hasComponent(w, RemotePlayer, eid) || hasComponent(w, Player, eid)) continue;
 
             const mesh = w.ctx.maps.mesh.get(eid)!;
             const rb = w.ctx.maps.rb.get(eid);
