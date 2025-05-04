@@ -1,10 +1,15 @@
 import { defineQuery, hasComponent, removeEntity } from 'bitecs';
-import { Lifespan, Projectile, Velocity, Transform, MeshRef } from '../components'; // Added Velocity, Transform, MeshRef
+import { Lifespan, Projectile, Velocity, Transform, MeshRef, RigidBodyRef } from '../components';
 import { ECS } from '../world';
 import * as THREE from 'three';
 
 export function initProjectileSystem(_world: ECS) {
-  const projectileQuery = defineQuery([Projectile, Lifespan, Velocity, Transform, MeshRef]);
+  // Query for all projectiles, whether physics-based or visual-only
+  const projectileQuery = defineQuery([Projectile, Lifespan]);
+  
+  // Separate query for visual-only projectiles (those without RigidBody)
+  const visualProjectileQuery = defineQuery([Projectile, Lifespan, Velocity, Transform, MeshRef]);
+  const physicsProjectileQuery = defineQuery([Projectile, Lifespan, RigidBodyRef]);
 
   return (w: ECS) => {
     const now = performance.now();
@@ -12,64 +17,81 @@ export function initProjectileSystem(_world: ECS) {
 
     const entitiesToRemove: number[] = [];
 
+    // First update visual-only projectiles with simple kinematic movement
+    for (const eid of visualProjectileQuery(w)) {
+      // Skip if entity already has a RigidBody (will be handled by physics system)
+      if (hasComponent(w, RigidBodyRef, eid)) continue;
+      
+      // --- Simple Kinematic Movement ---
+      Transform.x[eid] += Velocity.x[eid] * delta;
+      Transform.y[eid] += Velocity.y[eid] * delta;
+      Transform.z[eid] += Velocity.z[eid] * delta;
+
+      // Sync mesh position with Transform
+      const mesh = w.ctx.maps.mesh.get(eid);
+      if (mesh) {
+        mesh.position.set(Transform.x[eid], Transform.y[eid], Transform.z[eid]);
+      }
+    }
+
+    // Check all projectiles for lifespan and deletion flags
     for (const eid of projectileQuery(w)) {
-        // --- Simple Kinematic Movement ---
-        Transform.x[eid] += Velocity.x[eid] * delta;
-        Transform.y[eid] += Velocity.y[eid] * delta;
-        Transform.z[eid] += Velocity.z[eid] * delta;
+      // --- Check Lifespan ---
+      if (now - Lifespan.born[eid] > Lifespan.ttl[eid]) {
+        entitiesToRemove.push(eid);
+        continue;
+      }
 
-        // Sync mesh position with Transform
-        const mesh = w.ctx.maps.mesh.get(eid);
-        if (mesh) {
-            mesh.position.set(Transform.x[eid], Transform.y[eid], Transform.z[eid]);
+      // --- Check for Deletion Flag (from collision detection) ---
+      const mesh = w.ctx.maps.mesh.get(eid);
+      if (mesh?.userData?.markedForDeletion === true) {
+        if (!entitiesToRemove.includes(eid)) { // Avoid duplicates
+          entitiesToRemove.push(eid);
         }
-
-        // --- Check Lifespan ---
-        if (now - Lifespan.born[eid] > Lifespan.ttl[eid]) {
-            entitiesToRemove.push(eid);
-        }
-
-        // --- Check for Deletion Flag (from potential client-side collision effects) ---
-        // Note: Authoritative collision comes from server now.
-        // This flag might be set by local effects if desired.
-         if (mesh?.userData?.markedForDeletion === true) {
-             if (!entitiesToRemove.includes(eid)) { // Avoid duplicates
-                 entitiesToRemove.push(eid);
-             }
-         }
+      }
     }
 
     // --- Remove Entities ---
     for (const eid of entitiesToRemove) {
-        // Get and remove the mesh
-        const mesh = w.ctx.maps.mesh.get(eid);
-        if (mesh) {
-            w.ctx.three.scene.remove(mesh);
-            if (mesh instanceof THREE.Mesh) {
-                mesh.geometry?.dispose();
-                if (mesh.material) {
-                     if (Array.isArray(mesh.material)) {
-                         mesh.material.forEach(material => material?.dispose());
-                     } else {
-                         mesh.material.dispose();
-                     }
-                }
+      // Get and remove the mesh
+      const mesh = w.ctx.maps.mesh.get(eid);
+      if (mesh) {
+        w.ctx.three.scene.remove(mesh);
+        if (mesh instanceof THREE.Mesh) {
+          mesh.geometry?.dispose();
+          if (mesh.material) {
+            if (Array.isArray(mesh.material)) {
+              mesh.material.forEach(material => material?.dispose());
+            } else {
+              mesh.material.dispose();
             }
-            w.ctx.maps.mesh.delete(eid);
+          }
         }
+        w.ctx.maps.mesh.delete(eid);
+      }
 
-        // Remove Rapier body if it existed (shouldn't for visual bullets)
-        const rb = w.ctx.maps.rb.get(eid);
-        if (rb) {
-            console.warn(`Removing unexpected RigidBody for visual projectile ${eid}`);
-            w.ctx.physics.removeRigidBody(rb);
-            w.ctx.maps.rb.delete(eid);
+      // Remove Rapier body if it exists
+      const rb = w.ctx.maps.rb.get(eid);
+      if (rb) {
+        w.ctx.physics.removeRigidBody(rb);
+        w.ctx.maps.rb.delete(eid);
+        
+        // Also remove from entity handle map if it exists
+        if (w.ctx.entityHandleMap) {
+          // Search for this entity's handle
+          for (const [handle, entityId] of w.ctx.entityHandleMap.entries()) {
+            if (entityId === eid) {
+              w.ctx.entityHandleMap.delete(handle);
+              break;
+            }
+          }
         }
+      }
 
-        // Remove the entity if it still exists
-         if (hasComponent(w, Projectile, eid)) {
-            removeEntity(w, eid);
-         }
+      // Remove the entity if it still exists
+      if (hasComponent(w, Projectile, eid)) {
+        removeEntity(w, eid);
+      }
     }
 
     return w;

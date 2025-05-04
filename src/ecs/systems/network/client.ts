@@ -16,6 +16,7 @@ import {
 import { ECS, ECSContext } from '../../world';
 import { PlayerAnimationState } from '../../config';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader'; // Needed for loading remote player models
+import { createVisualProjectile } from '../player/shootSystem'; // Import the visual projectile function
 
 // --- Network State Interface ---
 export interface NetworkState {
@@ -124,9 +125,6 @@ class NetworkClient {
     send(data: any): void {
         if (this.state.connected && this.state.socket) {
             this.state.socket.send(JSON.stringify(data));
-        } else {
-            // console.warn("Cannot send message, WebSocket not connected.");
-            // Optionally queue messages to send upon reconnection
         }
     }
 
@@ -145,12 +143,12 @@ class NetworkClient {
     // --- Model Preloading ---
     private async preloadModels() {
         if (this.modelsLoaded) return;
-         console.log("Preloading player model for remote players...");
+        console.log("Preloading player model for remote players...");
         const loader = new GLTFLoader();
         try {
             await loader.loadAsync('/models/playermodel.glb');
             this.modelsLoaded = true;
-             console.log("Player model preloaded successfully.");
+            console.log("Player model preloaded successfully.");
         } catch (error) {
             console.error("Failed to preload player model:", error);
         }
@@ -222,7 +220,6 @@ export function initNetworkSystem(world: ECS) {
     const handlePlayerJoined = (data: any) => {
         const playerState = data.playerState;
         if (!playerState || playerState.id === world.ctx.localPlayerId || networkIdMap.has(playerState.id)) {
-             // console.log(`Skipping join for player ${playerState?.id} (self or already exists)`);
             return; // Don't add self or existing players
         }
         console.log(`Player ${playerState.id} joined, creating remote entity...`);
@@ -240,7 +237,7 @@ export function initNetworkSystem(world: ECS) {
         }
     };
 
-     const handleWorldState = (data: any) => {
+    const handleWorldState = (data: any) => {
         data.players?.forEach((playerState: any) => {
             if (playerState.id === world.ctx.localPlayerId) return; // Ignore updates for local player state
 
@@ -262,7 +259,6 @@ export function initNetworkSystem(world: ECS) {
                 }
                 if (hasComponent(world, Health, remoteEid) && playerState.health !== undefined) {
                      Health.current[remoteEid] = playerState.health;
-                     // Assuming max health is consistent or sent during init
                 }
             } else {
                 // Player doesn't exist locally, add them (might happen on late join/reconnect)
@@ -273,52 +269,22 @@ export function initNetworkSystem(world: ECS) {
     };
 
     const handlePlayerShoot = (data: any) => {
-         // console.log(`Received shoot event from player ${data.playerId}`);
         const shooterEid = networkIdMap.get(data.playerId);
         if (shooterEid === undefined || shooterEid === world.ctx.localPlayerId) return; // Ignore self or unknown
 
         // Find the shooter entity to get accurate position/direction for effects
         const shooterMesh = world.ctx.maps.mesh.get(shooterEid);
         if (shooterMesh) {
-             // Use the provided position/direction from the message for spawning
+            // Use the provided position/direction from the message for spawning
             const pos = new THREE.Vector3(data.position.x, data.position.y, data.position.z);
             const dir = new THREE.Vector3(data.direction.x, data.direction.y, data.direction.z);
 
-             // Create real projectile
-             const eid = addEntity(world);
-             addComponent(world, Projectile, eid);
-             addComponent(world, Lifespan, eid);
-             addComponent(world, MeshRef, eid);
-             addComponent(world, Transform, eid);
-             addComponent(world, Velocity, eid);
-             
-             // Setup lifespan
-             Lifespan.ttl[eid] = WeaponConfig.BULLET_TTL_MS;
-             Lifespan.born[eid] = performance.now();
-             
-             // Setup transform
-             Transform.x[eid] = pos.x;
-             Transform.y[eid] = pos.y;
-             Transform.z[eid] = pos.z;
-             Transform.qx[eid] = 0; Transform.qy[eid] = 0; Transform.qz[eid] = 0; Transform.qw[eid] = 1;
-             
-             // Setup velocity
-             Velocity.x[eid] = dir.x * WeaponConfig.BULLET_SPEED;
-             Velocity.y[eid] = dir.y * WeaponConfig.BULLET_SPEED;
-             Velocity.z[eid] = dir.z * WeaponConfig.BULLET_SPEED;
-             
-             // Create visual mesh with different color for remote player bullets
-             const mesh = new THREE.Mesh(
-                 new THREE.SphereGeometry(0.08, 8, 8),
-                 new THREE.MeshBasicMaterial({ color: 0x00aaff })
-             );
-             mesh.position.copy(pos);
-             world.ctx.three.scene.add(mesh);
-             world.ctx.maps.mesh.set(eid, mesh);
-             
-             // TODO: Play shooting sound spatially from shooterMesh position
+            // Create visual projectile for remote player shot
+            createVisualProjectile(world, pos, dir, 0x00aaff);
+            
+            // TODO: Play shooting sound spatially from shooterMesh position
         } else {
-             console.warn(`Shooter mesh not found for remote player ${data.playerId}`);
+            console.warn(`Shooter mesh not found for remote player ${data.playerId}`);
         }
     };
 
@@ -326,12 +292,12 @@ export function initNetworkSystem(world: ECS) {
         const localPlayers = localPlayerQuery(world);
         if (localPlayers.length > 0) {
             const localEid = localPlayers[0];
-             console.log(`Local player (${NetworkId.id[localEid]}) took ${data.damage} damage from ${data.sourceId}`);
-             if (hasComponent(world, Health, localEid)) {
-                 Health.current[localEid] = data.newHealth;
-                 // Trigger UI update or visual feedback here
-                 console.log(`My new health: ${Health.current[localEid]}`);
-             }
+            console.log(`Local player (${NetworkId.id[localEid]}) took ${data.damage} damage from ${data.sourceId}`);
+            if (hasComponent(world, Health, localEid)) {
+                Health.current[localEid] = data.newHealth;
+                // Trigger UI update or visual feedback here
+                console.log(`My new health: ${Health.current[localEid]}`);
+            }
         }
     };
 
@@ -340,55 +306,53 @@ export function initNetworkSystem(world: ECS) {
         if (targetEid !== undefined && targetEid !== world.ctx.localPlayerId) {
             if (hasComponent(world, Health, targetEid)) {
                 Health.current[targetEid] = data.health;
-                 // console.log(`Remote player ${data.playerId} health updated to ${data.health}`);
             }
         }
     };
 
-     const handleRespawn = (data: any) => {
-         console.log("Received respawn confirmation from server", data.newState);
-         const localPlayers = localPlayerQuery(world);
-         if (localPlayers.length > 0) {
-             const localEid = localPlayers[0];
-             const newState = data.newState;
+    const handleRespawn = (data: any) => {
+        console.log("Received respawn confirmation from server", data.newState);
+        const localPlayers = localPlayerQuery(world);
+        if (localPlayers.length > 0) {
+            const localEid = localPlayers[0];
+            const newState = data.newState;
 
-             // Forcefully set state based on server respawn data
-             if (newState.position) {
-                 Transform.x[localEid] = newState.position.x;
-                 Transform.y[localEid] = newState.position.y;
-                 Transform.z[localEid] = newState.position.z;
-                 const rb = world.ctx.maps.rb.get(localEid);
-                 if (rb) {
-                     rb.setTranslation(newState.position, true);
-                     rb.setLinvel({ x: 0, y: 0, z: 0 }, true);
-                     rb.setAngvel({ x: 0, y: 0, z: 0 }, true);
-                 }
-                 // Reset vertical velocity in FPController
-                 if(hasComponent(world, FPController, localEid)) {
+            // Forcefully set state based on server respawn data
+            if (newState.position) {
+                Transform.x[localEid] = newState.position.x;
+                Transform.y[localEid] = newState.position.y;
+                Transform.z[localEid] = newState.position.z;
+                const rb = world.ctx.maps.rb.get(localEid);
+                if (rb) {
+                    rb.setTranslation(newState.position, true);
+                    rb.setLinvel({ x: 0, y: 0, z: 0 }, true);
+                    rb.setAngvel({ x: 0, y: 0, z: 0 }, true);
+                }
+                // Reset vertical velocity in FPController
+                if(hasComponent(world, FPController, localEid)) {
                     FPController.vertVel[localEid] = 0;
                     FPController.moveState[localEid] = MovementState.GROUNDED; // Assume grounded after respawn
-                 }
-             }
-             if (newState.rotation) {
-                 Transform.qx[localEid] = newState.rotation.x;
-                 Transform.qy[localEid] = newState.rotation.y;
-                 Transform.qz[localEid] = newState.rotation.z;
-                 Transform.qw[localEid] = newState.rotation.w;
-                 const rb = world.ctx.maps.rb.get(localEid);
-                 if(rb) rb.setRotation(newState.rotation, true);
-                 // Also potentially update camera pitch if needed, though server usually doesn't dictate this
-             }
-             if (newState.health !== undefined) {
-                 Health.current[localEid] = newState.health;
-                 Health.max[localEid] = newState.maxHealth || PlayerConfig.MAX_HEALTH;
-             }
-              AnimationState.state[localEid] = PlayerAnimationState.IDLE; // Reset animation
+                }
+            }
+            if (newState.rotation) {
+                Transform.qx[localEid] = newState.rotation.x;
+                Transform.qy[localEid] = newState.rotation.y;
+                Transform.qz[localEid] = newState.rotation.z;
+                Transform.qw[localEid] = newState.rotation.w;
+                const rb = world.ctx.maps.rb.get(localEid);
+                if(rb) rb.setRotation(newState.rotation, true);
+                // Also potentially update camera pitch if needed, though server usually doesn't dictate this
+            }
+            if (newState.health !== undefined) {
+                Health.current[localEid] = newState.health;
+                Health.max[localEid] = newState.maxHealth || PlayerConfig.MAX_HEALTH;
+            }
+            AnimationState.state[localEid] = PlayerAnimationState.IDLE; // Reset animation
 
-             console.log(`Local player respawned at ${newState.position.x.toFixed(2)}, ${newState.position.y.toFixed(2)}, ${newState.position.z.toFixed(2)}`);
-             // Trigger UI updates if necessary
-         }
+            console.log(`Local player respawned at ${newState.position.x.toFixed(2)}, ${newState.position.y.toFixed(2)}, ${newState.position.z.toFixed(2)}`);
+            // Trigger UI updates if necessary
+        }
     };
-
 
     // --- System Logic ---
     return (w: ECS) => {
@@ -411,7 +375,6 @@ export function initNetworkSystem(world: ECS) {
                 case 'playerRespawned': /* Optional: Handle remote player visual respawn */ break;
                 case 'ping': /* Server ping, client can ignore or track latency */ break;
                 case 'error': console.error("Server Error:", message.message); break;
-                // case 'playerUpdate': handlePlayerUpdate(message); break; // Replaced by worldState
                 default: console.warn("Received unhandled message type:", message.type);
             }
         }
@@ -426,16 +389,10 @@ export function initNetworkSystem(world: ECS) {
                     rotation: { x: Transform.qx[eid], y: Transform.qy[eid], z: Transform.qz[eid], w: Transform.qw[eid] },
                     animationState: AnimationState.state[eid],
                     health: Health.current[eid], // Include health
-                    // Add other relevant state like aiming, shooting flags if needed
                 };
 
-                 // Basic delta compression (optional optimization)
-                // const lastSent = w.network.pendingUpdates.get(eid);
-                // if (!lastSent || !statesAreEqual(currentState, lastSent)) {
-                    network.send({ type: 'playerUpdate', state: currentState });
-                    // w.network.pendingUpdates.set(eid, currentState); // Store sent state
-                    w.network.lastSentTime = now;
-                // }
+                network.send({ type: 'playerUpdate', state: currentState });
+                w.network.lastSentTime = now;
             }
         }
 
@@ -453,8 +410,7 @@ export function initNetworkSystem(world: ECS) {
             const targetQZ = InterpolationTarget.targetQZ[eid];
             const targetQW = InterpolationTarget.targetQW[eid];
 
-             // Very simple interpolation: Move halfway towards the target each frame
-             // More sophisticated methods (using timestamps, lerp/slerp) are better
+            // Very simple interpolation: Move halfway towards the target each frame
             const lerpFactor = 0.2; // Adjust this for smoothness
 
             Transform.x[eid] += (targetX - Transform.x[eid]) * lerpFactor;
@@ -472,53 +428,44 @@ export function initNetworkSystem(world: ECS) {
             Transform.qw[eid] = currentQuat.w;
         }
 
-         // --- Handle Player Model Loading for New Remote Players ---
-         const entered = remotePlayerEnterQuery(w);
-         for (const eid of entered) {
-             const networkId = NetworkId.id[eid];
-             console.log(`Remote player entity ${eid} (NetworkID: ${networkId}) entered query. Setting up model...`);
-             // Ensure the setup runs only once per entity entry
-             if (!world.ctx.maps.mesh.has(eid)) {
+        // --- Handle Player Model Loading for New Remote Players ---
+        const entered = remotePlayerEnterQuery(w);
+        for (const eid of entered) {
+            const networkId = NetworkId.id[eid];
+            console.log(`Remote player entity ${eid} (NetworkID: ${networkId}) entered query. Setting up model...`);
+            // Ensure the setup runs only once per entity entry
+            if (!world.ctx.maps.mesh.has(eid)) {
                 setupRemotePlayerModel(world, world.ctx, eid, networkId);
-             }
-         }
+            }
+        }
 
-         // --- Handle Cleanup for Removed Remote Players ---
-         const exited = remotePlayerExitQuery(w);
-         for (const eid of exited) {
-             console.log(`Remote player entity ${eid} exited query. Cleaning up...`);
-             removeRemotePlayer(world, world.ctx, eid);
-             // The NetworkId mapping is cleaned up in handlePlayerLeft
-         }
+        // --- Handle Cleanup for Removed Remote Players ---
+        const exited = remotePlayerExitQuery(w);
+        for (const eid of exited) {
+            console.log(`Remote player entity ${eid} exited query. Cleaning up...`);
+            removeRemotePlayer(world, world.ctx, eid);
+            // The NetworkId mapping is cleaned up in handlePlayerLeft
+        }
 
-         // --- Ping Server ---
-         if (w.network.connected && now - w.network.lastPingTime > NetworkConfig.PING_INTERVAL_MS) {
-             network.send({ type: 'ping' });
-             w.network.lastPingTime = now;
-         }
-
+        // --- Ping Server ---
+        if (w.network.connected && now - w.network.lastPingTime > NetworkConfig.PING_INTERVAL_MS) {
+            network.send({ type: 'ping' });
+            w.network.lastPingTime = now;
+        }
 
         return w;
     };
 }
-
-// --- Helper Functions ---
-
-// Basic state comparison for delta compression (can be improved)
-// function statesAreEqual(state1: any, state2: any): boolean {
-//     // Simple comparison, needs refinement for floating point numbers and objects
-//     return JSON.stringify(state1) === JSON.stringify(state2);
-// }
 
 async function addRemotePlayer(world: ECS, ctx: ECSContext, playerState: any) {
     if (ctx.localPlayerId === playerState.id) {
         console.warn(`Attempted to add local player ${playerState.id} as remote.`);
         return;
     }
-     if (world.players.has(playerState.id)) {
-         console.warn(`Remote player ${playerState.id} already exists.`);
-         return;
-     }
+    if (world.players.has(playerState.id)) {
+        console.warn(`Remote player ${playerState.id} already exists.`);
+        return;
+    }
 
     const eid = addEntity(world);
     addComponent(world, RemotePlayer, eid);
@@ -566,27 +513,42 @@ async function setupRemotePlayerModel(world: ECS, ctx: ECSContext, eid: number, 
         const model = gltf.scene;
 
         model.scale.set(1, 1, 1); // Adjust scale as needed
-        model.position.set(0, -0.9, 0); // Adjust position relative to Transform component
-        model.rotation.y = Math.PI; // Face forward initially
-
+        model.position.set(0, 0, 0); // Position should be at entity center, not offset
+        model.rotation.y = 0; // Don't add rotation - let the transform handle it
+        
         // Add animation mixer if animations exist
         let mixer: THREE.AnimationMixer | null = null;
         if (gltf.animations && gltf.animations.length > 0) {
             mixer = new THREE.AnimationMixer(model);
-            // Store animations/actions if needed for playback later
-             model.userData.animations = gltf.animations; // Store animations raw data
-             model.userData.mixer = mixer;
-             model.userData.actions = {};
-             gltf.animations.forEach(clip => {
-                 const action = mixer!.clipAction(clip);
-                 // Basic setup - needs refinement based on actual animations
-                 action.setLoop(THREE.LoopRepeat);
-                 model.userData.actions[clip.name] = action;
-             });
-             // Start idle animation by default
-             const idleAction = Object.values(model.userData.actions).find((action: any) => action.getClip().name.toLowerCase().includes('idle'));
-             if (idleAction) (idleAction as THREE.AnimationAction).play();
-
+            // Store animations/actions for playback later
+            model.userData.animations = gltf.animations; // Store animations raw data
+            model.userData.mixer = mixer;
+            model.userData.actions = {};
+            
+            gltf.animations.forEach(clip => {
+                // Rename the clips to standardized names for better matching
+                let clipName = clip.name.toLowerCase();
+                let standardName = clip.name;
+                
+                if (clipName.includes('idle')) standardName = 'idle';
+                else if (clipName.includes('walk')) standardName = 'walk';
+                else if (clipName.includes('run')) standardName = 'run';
+                else if (clipName.includes('jump')) {
+                    if (clipName.includes('start')) standardName = 'jump_start';
+                    else if (clipName.includes('fall')) standardName = 'jump_fall';
+                    else standardName = 'jump';
+                }
+                
+                const action = mixer.clipAction(clip);
+                action.setLoop(THREE.LoopRepeat, Infinity);
+                model.userData.actions[standardName] = action;
+                console.log(`Animation loaded for remote player: ${standardName}`);
+            });
+            
+            // Start idle animation by default
+            if (model.userData.actions['idle']) {
+                model.userData.actions['idle'].play();
+            }
         }
 
         model.traverse((child) => {
@@ -613,26 +575,26 @@ async function setupRemotePlayerModel(world: ECS, ctx: ECSContext, eid: number, 
     }
 }
 
-
 function removeRemotePlayer(world: ECS, ctx: ECSContext, eid: number) {
     const mesh = ctx.maps.mesh.get(eid);
     if (mesh) {
         // Properly dispose of mesh resources
-         mesh.traverse((child) => {
-             if (child instanceof THREE.Mesh) {
-                 child.geometry?.dispose();
-                 if (child.material) {
-                     if (Array.isArray(child.material)) {
-                         child.material.forEach((mat) => mat.dispose());
-                     } else {
-                         child.material.dispose();
-                     }
-                 }
-             }
-         });
+        mesh.traverse((child) => {
+            if (child instanceof THREE.Mesh) {
+                child.geometry?.dispose();
+                if (child.material) {
+                    if (Array.isArray(child.material)) {
+                        child.material.forEach((mat) => mat.dispose());
+                    } else {
+                        child.material.dispose();
+                    }
+                }
+            }
+        });
         ctx.three.scene.remove(mesh);
         ctx.maps.mesh.delete(eid);
     }
+    
     // Remove Rapier body if it exists (remote players might not have one client-side)
     const rb = ctx.maps.rb.get(eid);
     if (rb) {
@@ -643,11 +605,11 @@ function removeRemotePlayer(world: ECS, ctx: ECSContext, eid: number) {
         }
     }
 
-     // Remove the entity itself if it still exists
-     if (hasComponent(world, NetworkId, eid)) { // Check if entity might have been removed already
-         removeEntity(world, eid);
-         console.log(`Removed remote player entity ${eid}`);
-     } else {
-         console.log(`Entity ${eid} already removed or invalid.`);
-     }
+    // Remove the entity itself if it still exists
+    if (hasComponent(world, NetworkId, eid)) { // Check if entity might have been removed already
+        removeEntity(world, eid);
+        console.log(`Removed remote player entity ${eid}`);
+    } else {
+        console.log(`Entity ${eid} already removed or invalid.`);
+    }
 }

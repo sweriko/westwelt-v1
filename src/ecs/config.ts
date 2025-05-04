@@ -24,7 +24,8 @@ export const PlayerConfig = {
 };
 
 export const WeaponConfig = {
-  // SHOOT_CD_MS removed - server now controls this
+  // Add this back for the player system
+  SHOOT_CD_MS: 200, 
   BULLET_SPEED: 40,
   BULLET_TTL_MS: 5000, // Used for visual effect lifetime
   BULLET_SPAWN_DISTANCE: 1.5,

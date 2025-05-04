@@ -1,80 +1,58 @@
-import { defineQuery, hasComponent } from 'bitecs';
+/**
+ * Player look system - handles camera movement via mouse input
+ */
+import { defineQuery } from 'bitecs';
 import * as THREE from 'three';
-import { LocalPlayer, FPController, Transform } from '../../components'; // Added Transform
+import { Player, LocalPlayer, FPController } from '../../components';
 import { ECS } from '../../world';
 import { InputState } from '../input';
 import { PlayerConfig } from '../../config';
 
-// Removed playerQuery, system now receives eid
-// const playerQuery = defineQuery([LocalPlayer, FPController, Transform]);
-
 export function initPlayerLookSystem(_world: ECS) {
+  // Query for either Player or LocalPlayer entities with FPController
+  const playerQuery = defineQuery([Player, FPController]);
+  const localPlayerQuery = defineQuery([LocalPlayer, FPController]);
 
-    // Use temporary quaternion for calculations
-    const deltaRotation = new THREE.Quaternion();
-    const currentRotation = new THREE.Quaternion();
-    const pitchQuat = new THREE.Quaternion();
-    const yawQuat = new THREE.Quaternion();
-    const forward = new THREE.Vector3(0, 0, -1);
-    const worldUp = new THREE.Vector3(0, 1, 0);
+  return (w: ECS) => {
+    const input = w.input as InputState;
+    // Input check removed - initInputSystem is guaranteed to run first
 
+    // Skip if pointer isn't locked
+    if (!input.pointerLocked) {
+      input.dx = input.dy = 0;
+      return w;
+    }
 
-    // System now receives world and the specific local player eid
-    return (w: ECS, eid: number) => {
-        const input = w.input as InputState;
-        if (!input) return w;
+    // Process both player and localPlayer entities
+    // In most cases, entities will have both components
+    const entities = new Set([...playerQuery(w), ...localPlayerQuery(w)]);
+    
+    for (const eid of entities) {
+      // Get the player object that holds the camera
+      const holder = w.ctx.maps.mesh.get(eid);
+      if (!holder) continue;
+      
+      // Update yaw (horizontal rotation)
+      holder.rotation.y = (holder.rotation.y - input.dx * PlayerConfig.MOUSE_SENSITIVITY) % (Math.PI * 2);
+      if (holder.rotation.y < 0) holder.rotation.y += Math.PI * 2;
 
-        // Skip if pointer isn't locked or no mouse movement
-        if (!input.pointerLocked || (input.dx === 0 && input.dy === 0)) {
-             input.dx = input.dy = 0; // Still reset deltas
-             return w;
-        }
-
-        // --- Process only the local player entity 'eid' ---
-        const holder = w.ctx.maps.mesh.get(eid); // Get the Object3D holder
-        if (!holder) return w;
-
-        // --- Yaw (Horizontal Rotation) - Applied to the holder/RigidBody/Transform ---
-        const yawAngle = -input.dx * PlayerConfig.MOUSE_SENSITIVITY;
-        yawQuat.setFromAxisAngle(worldUp, yawAngle);
-
-        // Get current rotation from Transform component
-        currentRotation.set(Transform.qx[eid], Transform.qy[eid], Transform.qz[eid], Transform.qw[eid]);
-
-        // Apply yaw to the current rotation
-        currentRotation.multiplyQuaternions(yawQuat, currentRotation); // Yaw multiplies from the left for world Y rotation
-        currentRotation.normalize();
-
-        // Update Transform component with new rotation
-        Transform.qx[eid] = currentRotation.x;
-        Transform.qy[eid] = currentRotation.y;
-        Transform.qz[eid] = currentRotation.z;
-        Transform.qw[eid] = currentRotation.w;
-
-         // Apply yaw rotation directly to the Object3D holder for immediate visual feedback
-         // This might be slightly redundant if RenderSync handles it, but helps responsiveness.
-         // Ensure holder.rotation is updated if RenderSync relies on it.
-         // holder.quaternion.copy(currentRotation); // Or let RenderSync handle this from Transform
-
-        // --- Pitch (Vertical Rotation) - Applied only to the camera ---
-        const currentPitch = FPController.pitch[eid];
-        let newPitch = currentPitch - input.dy * PlayerConfig.MOUSE_SENSITIVITY;
-        newPitch = THREE.MathUtils.clamp(newPitch, -Math.PI / 2 * 0.99, Math.PI / 2 * 0.99); // Clamp pitch
-
-        // Update pitch in FPController component
-        FPController.pitch[eid] = newPitch;
-
-        // Apply pitch directly to the camera object
-        const camera = w.ctx.three.camera;
-        if (camera) {
-             // We rotate camera locally around its X axis
-            pitchQuat.setFromAxisAngle(new THREE.Vector3(1, 0, 0), newPitch);
-            camera.quaternion.copy(pitchQuat); // Set camera's local rotation
-        }
-
-        // Reset mouse deltas after processing
-        input.dx = input.dy = 0;
-
-        return w;
-    };
+      // Update pitch (vertical look) with clamping
+      FPController.pitch[eid] = THREE.MathUtils.clamp(
+        FPController.pitch[eid] - input.dy * PlayerConfig.MOUSE_SENSITIVITY, 
+        -Math.PI / 2,  // Look up limit
+        Math.PI / 2    // Look down limit
+      );
+      
+      // Apply pitch to camera
+      const camera = w.ctx.three.camera;
+      if (camera) {
+        camera.rotation.x = FPController.pitch[eid];
+      }
+    }
+    
+    // Reset mouse deltas after processing
+    input.dx = input.dy = 0;
+    
+    return w;
+  };
 }

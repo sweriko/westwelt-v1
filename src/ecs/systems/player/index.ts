@@ -1,10 +1,13 @@
+/**
+ * Main player system that initializes and combines movement, look and shoot sub-systems
+ */
 import { addComponent, addEntity } from 'bitecs';
 import * as THREE from 'three';
 import {
-  MeshRef, RigidBodyRef, Transform, FPController, LocalPlayer, NetworkId, Health, AnimationState // Added multiplayer components
+  MeshRef, Player, LocalPlayer, RigidBodyRef, Transform, FPController, NetworkId, Health, AnimationState
 } from '../../components';
 import { ECS } from '../../world';
-import { MovementState, PlayerAnimationState, PlayerConfig } from '../../config'; // Added PlayerAnimationState
+import { MovementState, PlayerAnimationState, PlayerConfig } from '../../config';
 import { initPlayerMovementSystem } from './movementSystem';
 import { initPlayerLookSystem } from './lookSystem';
 import { initPlayerShootSystem } from './shootSystem';
@@ -13,81 +16,75 @@ import { initPlayerAnimationSystem } from './animationSystem';
 export function initPlayerSystem(world: ECS) {
   const { rapier, physics, three, maps } = world.ctx;
 
-  // Create the *local* player entity
+  /* entity + mesh holder ------------------------------------------- */
   const pid = addEntity(world);
-  addComponent(world, LocalPlayer,    pid); // Tag as LocalPlayer
-  addComponent(world, NetworkId,      pid); // Will be set by server init message
-  addComponent(world, Transform,      pid);
-  addComponent(world, MeshRef,        pid);
-  addComponent(world, RigidBodyRef,   pid);
-  addComponent(world, FPController,   pid);
-  addComponent(world, Health,         pid); // Add Health component
-  addComponent(world, AnimationState, pid); // Add AnimationState component
-
-  NetworkId.id[pid] = 0; // Placeholder ID, server will assign correct one
+  addComponent(world, Player,       pid);
+  addComponent(world, LocalPlayer,  pid); // Add LocalPlayer for network compatibility
+  addComponent(world, NetworkId,    pid); // Add NetworkId for multiplayer
+  addComponent(world, Transform,    pid);
+  addComponent(world, MeshRef,      pid);
+  addComponent(world, RigidBodyRef, pid);
+  addComponent(world, FPController, pid);
+  addComponent(world, Health,       pid);
+  addComponent(world, AnimationState, pid);
+  
+  // Set default values for networked components
+  NetworkId.id[pid] = 0; // Will be set by server
   Health.current[pid] = PlayerConfig.MAX_HEALTH;
   Health.max[pid] = PlayerConfig.MAX_HEALTH;
-  AnimationState.state[pid] = PlayerAnimationState.IDLE; // Start in Idle state
-
-  // Initialize controller state (same as before)
+  AnimationState.state[pid] = PlayerAnimationState.IDLE;
+  
+  // Initialize controller state
   FPController.pitch[pid] = 0;
   FPController.vertVel[pid] = 0;
   FPController.moveState[pid] = MovementState.GROUNDED;
   FPController.lastGrounded[pid] = performance.now();
   FPController.lastJump[pid] = 0;
-  // FPController.lastShot removed - handled by server/network
+  FPController.lastShot[pid] = 0;
   FPController.jumpRequested[pid] = 0;
   FPController.lastJumpRequest[pid] = 0;
 
-  // --- Mesh Holder ---
   const holder = new THREE.Object3D();
-  // Start position might be overridden by server 'init' message
-  holder.position.set(0, 20, 10); // Start much higher above the cube stack
+  holder.position.set(0, 3, 6);
   three.scene.add(holder);
-  maps.mesh.set(pid, holder); // Associate entity ID with the holder mesh
+  maps.mesh.set(pid, holder);
 
-  // Camera setup inside the holder
+  // Position the camera in the holder
   const cameraOffset = new THREE.Object3D();
-  cameraOffset.position.set(0, 0.7, 0); // Eye height relative to holder's base (adjust from 1.6)
+  cameraOffset.position.set(0, 1.6, 0); // Eye height of ~1.6m
   holder.add(cameraOffset);
   cameraOffset.add(three.camera);
 
-  // --- Rapier Body ---
+  /* Rapier kinematic capsule --------------------------------------- */
   const rb = physics.createRigidBody(
     rapier.RigidBodyDesc.kinematicPositionBased()
           .setTranslation(holder.position.x, holder.position.y, holder.position.z)
-          .setCcdEnabled(true) // Keep CCD enabled for player potentially
+          .setCcdEnabled(true)
   );
   const collider = physics.createCollider(
-    // Slightly thinner capsule collider
-    rapier.ColliderDesc.capsule(0.8, 0.3) // Height 0.8, Radius 0.3
-      .setFriction(0.1) // Lower friction
-      .setDensity(1.0), // Set density for KCC interactions
-    rb
+    rapier.ColliderDesc.capsule(0.9, 0.3).setFriction(0.2), rb
   );
 
-  // --- Kinematic Character Controller ---
-  const kcc = physics.createCharacterController(0.02); // Slightly larger offset
+  const kcc = physics.createCharacterController(0.01);
   kcc.setApplyImpulsesToDynamicBodies(true);
-  kcc.enableAutostep(0.4, 0.4, true); // Adjusted auto-step parameters
-  kcc.enableSnapToGround(0.5); // Increased snap distance slightly
-  kcc.setSlideEnabled(true); // Enable sliding
+  kcc.setUp({ x: 0, y: 1, z: 0 });
+  kcc.enableAutostep(0.5, 0.3, true);
+  kcc.enableSnapToGround(0.3);
 
   maps.rb.set(pid, rb);
   RigidBodyRef.id[pid] = rb.handle;
-
-  // Store KCC and collider in world context
+  
+  // Store KCC and collider for use in movement system
   world.ctx.kcc = kcc;
   world.ctx.playerCollider = collider;
-
-  // Update entity handle map
+  
+  // Add to entity handle map for collision detection
   if (world.ctx.entityHandleMap) {
-      world.ctx.entityHandleMap.set(rb.handle, pid);
+    world.ctx.entityHandleMap.set(rb.handle, pid);
   } else {
-      world.ctx.entityHandleMap = new Map<number, number>();
-      world.ctx.entityHandleMap.set(rb.handle, pid);
+    world.ctx.entityHandleMap = new Map<number, number>();
+    world.ctx.entityHandleMap.set(rb.handle, pid);
   }
-
 
   // Initialize sub-systems
   const movementSystem = initPlayerMovementSystem(world);
@@ -95,19 +92,14 @@ export function initPlayerSystem(world: ECS) {
   const shootSystem = initPlayerShootSystem(world);
   const animationSystem = initPlayerAnimationSystem(world);
 
-  // Combined system - runs sub-systems *only* for the local player
+  /* Combined system ------------------------------------------------- */
   return (w: ECS) => {
-    const localPlayers = world.players.get(w.ctx.localPlayerId!);
-    if (localPlayers !== undefined) { // Check if the local player entity exists
-        const localEid = localPlayers;
-        // Run systems specifically for the local player entity
-        lookSystem(w, localEid);
-        movementSystem(w, localEid);
-        shootSystem(w, localEid);
-        animationSystem(w, localEid); // Animation system needs to run for local player
-    }
-     // Animation system might also need to run for remote players separately
-     // Consider moving remote player animation updates to RenderSync or a dedicated system
+    // Run all sub-systems in sequence
+    lookSystem(w);
+    movementSystem(w);
+    shootSystem(w);
+    animationSystem(w);
+    
     return w;
   };
 }

@@ -1,15 +1,6 @@
 <goal>
-I recently created a bunch of files for a multiplayer integration, and it kinda works, but in the process, I broke a few things and made other worse.
-
--I want the old bullet logic back, I want projectile/rigid body based bullets that correctly interact with the world
--currently, i can only see the opponents playermodel, but not my own anymore, and i can only see the opponents playermodel doing the idle animation, ensure that walking animation flags are broadcasted via the server to other players to do client side processing/applying of the walking animation to that playermodel, also I noticed that the opponents playermodel is wrongly oriented by 180° (model is looking in the opposite direction of where the player actually is looking at), and it also has a y offset, making that playermodel float above the ground
--the playercontroller seems messed up? i cant jump anymore, or the player collider is halfway stuck underground? idk
--in the f12 logs i also see a bunch of these warnings for basically all the bones
-""
-THREE.PropertyBinding: No target node found for track: mixamorigHips.position. animationSystem.ts:105 
-""
-
-Beside this current codebase, I also have the old one attached (that had none of these issues, but didnt have any multiplayer logic built in)
+I want you to fix all the issues.
+The following is the current codebase
 </goal>
 
 <output_requirements>
@@ -866,18 +857,19 @@ export function populateScene(world: ECS, ctx: ECSContext): void {
 File: /src/ecs/systems/collision.ts
 ================================================
 import { defineQuery, addComponent, addEntity, hasComponent } from 'bitecs';
-import { Projectile, CubeTag, RigidBodyRef, CollisionEvent, Health, LocalPlayer } from '../components'; // Added Health, LocalPlayer
+import { Projectile, CubeTag, RigidBodyRef, CollisionEvent, Health, LocalPlayer, NetworkId } from '../components';
 import { ECS } from '../world';
 import { vec3Pool, createEntityPairKey } from '../utils/mathUtils';
-import { PhysicsConfig, WeaponConfig } from '../config'; // Added WeaponConfig
-import { network } from './network/client'; // Import network client
+import { PhysicsConfig, WeaponConfig } from '../config';
+import { network } from './network/client';
 
 export function initCollisionSystem(world: ECS) {
-  // Queries remain the same for projectile-cube interaction
+  // Queries for finding entities
   const projectileQuery = defineQuery([Projectile, RigidBodyRef]);
   const cubeQuery = defineQuery([CubeTag, RigidBodyRef]);
-  const localPlayerQuery = defineQuery([LocalPlayer]); // Query for local player
-
+  const localPlayerQuery = defineQuery([LocalPlayer]);
+  
+  // Processed collisions cache to avoid duplicates
   const processedCollisions = new Map<bigint, number>();
 
   // Initialize entity handle mapping if not done already
@@ -885,6 +877,7 @@ export function initCollisionSystem(world: ECS) {
     world.ctx.entityHandleMap = new Map<number, number>();
   }
 
+  // Helper function to mark entities for deletion
   function markEntityForDeletion(w: ECS, eid: number) {
     const mesh = w.ctx.maps.mesh.get(eid);
     if (mesh) {
@@ -903,97 +896,127 @@ export function initCollisionSystem(world: ECS) {
       }
     }
 
+    // Skip if event queue not available
     if (!w.ctx.eventQueue) {
       return w;
     }
 
-    // Update entity handle map (can be optimized)
-    const projectiles = projectileQuery(w);
-    const cubes = cubeQuery(w);
-    for (const eid of projectiles) {
-        const rb = w.ctx.maps.rb.get(eid);
-        if (rb && !w.ctx.entityHandleMap!.has(rb.handle)) {
-            w.ctx.entityHandleMap!.set(rb.handle, eid);
-        }
+    // Update entity handle map for projectiles and cubes
+    // This helps translate Rapier body handles to our ECS entity IDs
+    for (const eid of projectileQuery(w)) {
+      const rb = w.ctx.maps.rb.get(eid);
+      if (rb && !w.ctx.entityHandleMap!.has(rb.handle)) {
+        w.ctx.entityHandleMap!.set(rb.handle, eid);
+      }
     }
-     for (const eid of cubes) {
-         const rb = w.ctx.maps.rb.get(eid);
-         if (rb && !w.ctx.entityHandleMap!.has(rb.handle)) {
-             w.ctx.entityHandleMap!.set(rb.handle, eid);
-         }
-     }
-
+    
+    for (const eid of cubeQuery(w)) {
+      const rb = w.ctx.maps.rb.get(eid);
+      if (rb && !w.ctx.entityHandleMap!.has(rb.handle)) {
+        w.ctx.entityHandleMap!.set(rb.handle, eid);
+      }
+    }
 
     // Process collision events from Rapier physics
     w.ctx.eventQueue.drainCollisionEvents((handle1: number, handle2: number, started: boolean) => {
-        if (!started) return; // Only care about collision starts
+      if (!started) return; // Only care about collision starts
 
-        const entity1 = w.ctx.entityHandleMap!.get(handle1);
-        const entity2 = w.ctx.entityHandleMap!.get(handle2);
+      // Get entity IDs from rigid body handles
+      const entity1 = w.ctx.entityHandleMap!.get(handle1);
+      const entity2 = w.ctx.entityHandleMap!.get(handle2);
 
-        if (!entity1 || !entity2) return;
+      if (!entity1 || !entity2) return;
 
-        const isProjectile1 = hasComponent(w, Projectile, entity1);
-        const isProjectile2 = hasComponent(w, Projectile, entity2);
-        const isCube1 = hasComponent(w, CubeTag, entity1);
-        const isCube2 = hasComponent(w, CubeTag, entity2);
-        const isLocalPlayer1 = hasComponent(w, LocalPlayer, entity1); // Check if it's the local player
-        const isLocalPlayer2 = hasComponent(w, LocalPlayer, entity2);
+      // Check entity types
+      const isProjectile1 = hasComponent(w, Projectile, entity1);
+      const isProjectile2 = hasComponent(w, Projectile, entity2);
+      const isCube1 = hasComponent(w, CubeTag, entity1);
+      const isCube2 = hasComponent(w, CubeTag, entity2);
+      const isLocalPlayer1 = hasComponent(w, LocalPlayer, entity1);
+      const isLocalPlayer2 = hasComponent(w, LocalPlayer, entity2);
+      
+      // --- Collision: Projectile <-> Cube ---
+      if ((isProjectile1 && isCube2) || (isProjectile2 && isCube1)) {
+        const projectileEid = isProjectile1 ? entity1 : entity2;
+        const cubeEid = isCube1 ? entity1 : entity2;
 
-        // --- Collision: Projectile <-> Cube ---
-        if ((isProjectile1 && isCube2) || (isProjectile2 && isCube1)) {
-            const projectileEid = isProjectile1 ? entity1 : entity2;
-            const cubeEid = isCube1 ? entity1 : entity2;
+        // Create a unique collision ID to prevent duplicate processing
+        const collisionId = createEntityPairKey(projectileEid, cubeEid);
+        if (processedCollisions.has(collisionId)) return;
+        processedCollisions.set(collisionId, now);
 
-            const collisionId = createEntityPairKey(projectileEid, cubeEid);
-            if (processedCollisions.has(collisionId)) return;
-            processedCollisions.set(collisionId, now);
+        // Get the rigid bodies
+        const cubeRB = w.ctx.maps.rb.get(cubeEid);
+        const projectileRB = w.ctx.maps.rb.get(projectileEid);
+        if (!cubeRB || !projectileRB) return;
 
-            const cubeRB = w.ctx.maps.rb.get(cubeEid);
-            const projectileRB = w.ctx.maps.rb.get(projectileEid);
-            if (!cubeRB || !projectileRB) return;
-
-            // Apply impulse (same as before)
-            const bulletPos = projectileRB.translation();
-            const cubePos = cubeRB.translation();
-            const impactDir = vec3Pool.get().set(
-                cubePos.x - bulletPos.x, cubePos.y - bulletPos.y, cubePos.z - bulletPos.z
-            ).normalize();
-             if (impactDir.lengthSq() < 0.001) {
-                 const vel = projectileRB.linvel();
-                 impactDir.set(-vel.x, -vel.y, -vel.z).normalize();
-             }
-            cubeRB.applyImpulseAtPoint(
-                { x: impactDir.x * PhysicsConfig.IMPACT_FORCE, y: impactDir.y * PhysicsConfig.IMPACT_FORCE, z: impactDir.z * PhysicsConfig.IMPACT_FORCE },
-                bulletPos,
-                true
-            );
-             cubeRB.applyTorqueImpulse({ x: (Math.random() - 0.5) * PhysicsConfig.IMPACT_FORCE * 0.3, y: (Math.random() - 0.5) * PhysicsConfig.IMPACT_FORCE * 0.3, z: (Math.random() - 0.5) * PhysicsConfig.IMPACT_FORCE * 0.3 }, true);
-
-
-            // Mark projectile for deletion
-            markEntityForDeletion(w, projectileEid);
-            vec3Pool.release(impactDir);
-            return; // Processed this collision
+        // Apply impulse to cube
+        const bulletPos = projectileRB.translation();
+        const cubePos = cubeRB.translation();
+        
+        // Calculate impact direction
+        const impactDir = vec3Pool.get().set(
+          cubePos.x - bulletPos.x, 
+          cubePos.y - bulletPos.y, 
+          cubePos.z - bulletPos.z
+        ).normalize();
+        
+        // If direction is zero (direct center hit), use reversed bullet velocity
+        if (impactDir.lengthSq() < 0.001) {
+          const vel = projectileRB.linvel();
+          impactDir.set(-vel.x, -vel.y, -vel.z).normalize();
         }
+        
+        // Apply impulse at impact point
+        cubeRB.applyImpulseAtPoint(
+          { 
+            x: impactDir.x * PhysicsConfig.IMPACT_FORCE, 
+            y: impactDir.y * PhysicsConfig.IMPACT_FORCE, 
+            z: impactDir.z * PhysicsConfig.IMPACT_FORCE 
+          },
+          bulletPos,
+          true
+        );
+        
+        // Apply random torque for more natural movement
+        cubeRB.applyTorqueImpulse(
+          { 
+            x: (Math.random() - 0.5) * PhysicsConfig.IMPACT_FORCE * 0.3, 
+            y: (Math.random() - 0.5) * PhysicsConfig.IMPACT_FORCE * 0.3, 
+            z: (Math.random() - 0.5) * PhysicsConfig.IMPACT_FORCE * 0.3 
+          }, 
+          true
+        );
 
-         // --- Collision: Projectile <-> LocalPlayer ---
-         // This should NOT happen if projectiles are visual-only or sensors are used correctly.
-         // However, if a physics-based projectile hits the local player's *physical* collider:
-         if ((isProjectile1 && isLocalPlayer2) || (isProjectile2 && isLocalPlayer1)) {
-             const projectileEid = isProjectile1 ? entity1 : entity2;
-             const playerEid = isLocalPlayer1 ? entity1 : entity2;
+        // Mark projectile for deletion
+        markEntityForDeletion(w, projectileEid);
+        vec3Pool.release(impactDir);
+        return; // Processed this collision
+      }
 
-             console.warn(`Client-side collision detected between local player ${playerEid} and projectile ${projectileEid}. This might indicate an issue if hits are server-authoritative.`);
+      // --- Collision: Projectile <-> LocalPlayer ---
+      // This should only happen with OTHER players' projectiles hitting the local player
+      // The server is authoritative, but we can use this to provide immediate visual feedback
+      if ((isProjectile1 && isLocalPlayer2) || (isProjectile2 && isLocalPlayer1)) {
+        const projectileEid = isProjectile1 ? entity1 : entity2;
+        const playerEid = isLocalPlayer1 ? entity1 : entity2;
 
-             // Optionally apply visual feedback or mark projectile for deletion,
-             // but do NOT apply damage here. Damage comes from the server.
-             markEntityForDeletion(w, projectileEid);
-             return;
-         }
+        // Create a unique collision ID to prevent duplicate processing
+        const collisionId = createEntityPairKey(projectileEid, playerEid);
+        if (processedCollisions.has(collisionId)) return;
+        processedCollisions.set(collisionId, now);
 
-         // --- Add other collision types if needed (e.g., Player <-> Cube) ---
-
+        console.log(`Local impact detected: projectile ${projectileEid} hit local player ${playerEid}`);
+        
+        // Mark projectile for deletion (visual feedback)
+        markEntityForDeletion(w, projectileEid);
+        
+        // Server will determine actual damage via hit event,
+        // but we can trigger immediate local feedback if desired:
+        // For example, play hit sound, flash screen, etc.
+        
+        return; // Processed this collision
+      }
     });
 
     return w;
@@ -2099,6 +2122,7 @@ import {
 import { ECS, ECSContext } from '../../world';
 import { PlayerAnimationState } from '../../config';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader'; // Needed for loading remote player models
+import { createVisualProjectile } from '../player/shootSystem'; // Import the visual projectile function
 
 // --- Network State Interface ---
 export interface NetworkState {
@@ -2207,9 +2231,6 @@ class NetworkClient {
     send(data: any): void {
         if (this.state.connected && this.state.socket) {
             this.state.socket.send(JSON.stringify(data));
-        } else {
-            // console.warn("Cannot send message, WebSocket not connected.");
-            // Optionally queue messages to send upon reconnection
         }
     }
 
@@ -2228,12 +2249,12 @@ class NetworkClient {
     // --- Model Preloading ---
     private async preloadModels() {
         if (this.modelsLoaded) return;
-         console.log("Preloading player model for remote players...");
+        console.log("Preloading player model for remote players...");
         const loader = new GLTFLoader();
         try {
             await loader.loadAsync('/models/playermodel.glb');
             this.modelsLoaded = true;
-             console.log("Player model preloaded successfully.");
+            console.log("Player model preloaded successfully.");
         } catch (error) {
             console.error("Failed to preload player model:", error);
         }
@@ -2305,7 +2326,6 @@ export function initNetworkSystem(world: ECS) {
     const handlePlayerJoined = (data: any) => {
         const playerState = data.playerState;
         if (!playerState || playerState.id === world.ctx.localPlayerId || networkIdMap.has(playerState.id)) {
-             // console.log(`Skipping join for player ${playerState?.id} (self or already exists)`);
             return; // Don't add self or existing players
         }
         console.log(`Player ${playerState.id} joined, creating remote entity...`);
@@ -2323,7 +2343,7 @@ export function initNetworkSystem(world: ECS) {
         }
     };
 
-     const handleWorldState = (data: any) => {
+    const handleWorldState = (data: any) => {
         data.players?.forEach((playerState: any) => {
             if (playerState.id === world.ctx.localPlayerId) return; // Ignore updates for local player state
 
@@ -2345,7 +2365,6 @@ export function initNetworkSystem(world: ECS) {
                 }
                 if (hasComponent(world, Health, remoteEid) && playerState.health !== undefined) {
                      Health.current[remoteEid] = playerState.health;
-                     // Assuming max health is consistent or sent during init
                 }
             } else {
                 // Player doesn't exist locally, add them (might happen on late join/reconnect)
@@ -2356,52 +2375,22 @@ export function initNetworkSystem(world: ECS) {
     };
 
     const handlePlayerShoot = (data: any) => {
-         // console.log(`Received shoot event from player ${data.playerId}`);
         const shooterEid = networkIdMap.get(data.playerId);
         if (shooterEid === undefined || shooterEid === world.ctx.localPlayerId) return; // Ignore self or unknown
 
         // Find the shooter entity to get accurate position/direction for effects
         const shooterMesh = world.ctx.maps.mesh.get(shooterEid);
         if (shooterMesh) {
-             // Use the provided position/direction from the message for spawning
+            // Use the provided position/direction from the message for spawning
             const pos = new THREE.Vector3(data.position.x, data.position.y, data.position.z);
             const dir = new THREE.Vector3(data.direction.x, data.direction.y, data.direction.z);
 
-             // Create real projectile
-             const eid = addEntity(world);
-             addComponent(world, Projectile, eid);
-             addComponent(world, Lifespan, eid);
-             addComponent(world, MeshRef, eid);
-             addComponent(world, Transform, eid);
-             addComponent(world, Velocity, eid);
-             
-             // Setup lifespan
-             Lifespan.ttl[eid] = WeaponConfig.BULLET_TTL_MS;
-             Lifespan.born[eid] = performance.now();
-             
-             // Setup transform
-             Transform.x[eid] = pos.x;
-             Transform.y[eid] = pos.y;
-             Transform.z[eid] = pos.z;
-             Transform.qx[eid] = 0; Transform.qy[eid] = 0; Transform.qz[eid] = 0; Transform.qw[eid] = 1;
-             
-             // Setup velocity
-             Velocity.x[eid] = dir.x * WeaponConfig.BULLET_SPEED;
-             Velocity.y[eid] = dir.y * WeaponConfig.BULLET_SPEED;
-             Velocity.z[eid] = dir.z * WeaponConfig.BULLET_SPEED;
-             
-             // Create visual mesh with different color for remote player bullets
-             const mesh = new THREE.Mesh(
-                 new THREE.SphereGeometry(0.08, 8, 8),
-                 new THREE.MeshBasicMaterial({ color: 0x00aaff })
-             );
-             mesh.position.copy(pos);
-             world.ctx.three.scene.add(mesh);
-             world.ctx.maps.mesh.set(eid, mesh);
-             
-             // TODO: Play shooting sound spatially from shooterMesh position
+            // Create visual projectile for remote player shot
+            createVisualProjectile(world, pos, dir, 0x00aaff);
+            
+            // TODO: Play shooting sound spatially from shooterMesh position
         } else {
-             console.warn(`Shooter mesh not found for remote player ${data.playerId}`);
+            console.warn(`Shooter mesh not found for remote player ${data.playerId}`);
         }
     };
 
@@ -2409,12 +2398,12 @@ export function initNetworkSystem(world: ECS) {
         const localPlayers = localPlayerQuery(world);
         if (localPlayers.length > 0) {
             const localEid = localPlayers[0];
-             console.log(`Local player (${NetworkId.id[localEid]}) took ${data.damage} damage from ${data.sourceId}`);
-             if (hasComponent(world, Health, localEid)) {
-                 Health.current[localEid] = data.newHealth;
-                 // Trigger UI update or visual feedback here
-                 console.log(`My new health: ${Health.current[localEid]}`);
-             }
+            console.log(`Local player (${NetworkId.id[localEid]}) took ${data.damage} damage from ${data.sourceId}`);
+            if (hasComponent(world, Health, localEid)) {
+                Health.current[localEid] = data.newHealth;
+                // Trigger UI update or visual feedback here
+                console.log(`My new health: ${Health.current[localEid]}`);
+            }
         }
     };
 
@@ -2423,55 +2412,53 @@ export function initNetworkSystem(world: ECS) {
         if (targetEid !== undefined && targetEid !== world.ctx.localPlayerId) {
             if (hasComponent(world, Health, targetEid)) {
                 Health.current[targetEid] = data.health;
-                 // console.log(`Remote player ${data.playerId} health updated to ${data.health}`);
             }
         }
     };
 
-     const handleRespawn = (data: any) => {
-         console.log("Received respawn confirmation from server", data.newState);
-         const localPlayers = localPlayerQuery(world);
-         if (localPlayers.length > 0) {
-             const localEid = localPlayers[0];
-             const newState = data.newState;
+    const handleRespawn = (data: any) => {
+        console.log("Received respawn confirmation from server", data.newState);
+        const localPlayers = localPlayerQuery(world);
+        if (localPlayers.length > 0) {
+            const localEid = localPlayers[0];
+            const newState = data.newState;
 
-             // Forcefully set state based on server respawn data
-             if (newState.position) {
-                 Transform.x[localEid] = newState.position.x;
-                 Transform.y[localEid] = newState.position.y;
-                 Transform.z[localEid] = newState.position.z;
-                 const rb = world.ctx.maps.rb.get(localEid);
-                 if (rb) {
-                     rb.setTranslation(newState.position, true);
-                     rb.setLinvel({ x: 0, y: 0, z: 0 }, true);
-                     rb.setAngvel({ x: 0, y: 0, z: 0 }, true);
-                 }
-                 // Reset vertical velocity in FPController
-                 if(hasComponent(world, FPController, localEid)) {
+            // Forcefully set state based on server respawn data
+            if (newState.position) {
+                Transform.x[localEid] = newState.position.x;
+                Transform.y[localEid] = newState.position.y;
+                Transform.z[localEid] = newState.position.z;
+                const rb = world.ctx.maps.rb.get(localEid);
+                if (rb) {
+                    rb.setTranslation(newState.position, true);
+                    rb.setLinvel({ x: 0, y: 0, z: 0 }, true);
+                    rb.setAngvel({ x: 0, y: 0, z: 0 }, true);
+                }
+                // Reset vertical velocity in FPController
+                if(hasComponent(world, FPController, localEid)) {
                     FPController.vertVel[localEid] = 0;
                     FPController.moveState[localEid] = MovementState.GROUNDED; // Assume grounded after respawn
-                 }
-             }
-             if (newState.rotation) {
-                 Transform.qx[localEid] = newState.rotation.x;
-                 Transform.qy[localEid] = newState.rotation.y;
-                 Transform.qz[localEid] = newState.rotation.z;
-                 Transform.qw[localEid] = newState.rotation.w;
-                 const rb = world.ctx.maps.rb.get(localEid);
-                 if(rb) rb.setRotation(newState.rotation, true);
-                 // Also potentially update camera pitch if needed, though server usually doesn't dictate this
-             }
-             if (newState.health !== undefined) {
-                 Health.current[localEid] = newState.health;
-                 Health.max[localEid] = newState.maxHealth || PlayerConfig.MAX_HEALTH;
-             }
-              AnimationState.state[localEid] = PlayerAnimationState.IDLE; // Reset animation
+                }
+            }
+            if (newState.rotation) {
+                Transform.qx[localEid] = newState.rotation.x;
+                Transform.qy[localEid] = newState.rotation.y;
+                Transform.qz[localEid] = newState.rotation.z;
+                Transform.qw[localEid] = newState.rotation.w;
+                const rb = world.ctx.maps.rb.get(localEid);
+                if(rb) rb.setRotation(newState.rotation, true);
+                // Also potentially update camera pitch if needed, though server usually doesn't dictate this
+            }
+            if (newState.health !== undefined) {
+                Health.current[localEid] = newState.health;
+                Health.max[localEid] = newState.maxHealth || PlayerConfig.MAX_HEALTH;
+            }
+            AnimationState.state[localEid] = PlayerAnimationState.IDLE; // Reset animation
 
-             console.log(`Local player respawned at ${newState.position.x.toFixed(2)}, ${newState.position.y.toFixed(2)}, ${newState.position.z.toFixed(2)}`);
-             // Trigger UI updates if necessary
-         }
+            console.log(`Local player respawned at ${newState.position.x.toFixed(2)}, ${newState.position.y.toFixed(2)}, ${newState.position.z.toFixed(2)}`);
+            // Trigger UI updates if necessary
+        }
     };
-
 
     // --- System Logic ---
     return (w: ECS) => {
@@ -2494,7 +2481,6 @@ export function initNetworkSystem(world: ECS) {
                 case 'playerRespawned': /* Optional: Handle remote player visual respawn */ break;
                 case 'ping': /* Server ping, client can ignore or track latency */ break;
                 case 'error': console.error("Server Error:", message.message); break;
-                // case 'playerUpdate': handlePlayerUpdate(message); break; // Replaced by worldState
                 default: console.warn("Received unhandled message type:", message.type);
             }
         }
@@ -2509,16 +2495,10 @@ export function initNetworkSystem(world: ECS) {
                     rotation: { x: Transform.qx[eid], y: Transform.qy[eid], z: Transform.qz[eid], w: Transform.qw[eid] },
                     animationState: AnimationState.state[eid],
                     health: Health.current[eid], // Include health
-                    // Add other relevant state like aiming, shooting flags if needed
                 };
 
-                 // Basic delta compression (optional optimization)
-                // const lastSent = w.network.pendingUpdates.get(eid);
-                // if (!lastSent || !statesAreEqual(currentState, lastSent)) {
-                    network.send({ type: 'playerUpdate', state: currentState });
-                    // w.network.pendingUpdates.set(eid, currentState); // Store sent state
-                    w.network.lastSentTime = now;
-                // }
+                network.send({ type: 'playerUpdate', state: currentState });
+                w.network.lastSentTime = now;
             }
         }
 
@@ -2536,8 +2516,7 @@ export function initNetworkSystem(world: ECS) {
             const targetQZ = InterpolationTarget.targetQZ[eid];
             const targetQW = InterpolationTarget.targetQW[eid];
 
-             // Very simple interpolation: Move halfway towards the target each frame
-             // More sophisticated methods (using timestamps, lerp/slerp) are better
+            // Very simple interpolation: Move halfway towards the target each frame
             const lerpFactor = 0.2; // Adjust this for smoothness
 
             Transform.x[eid] += (targetX - Transform.x[eid]) * lerpFactor;
@@ -2555,53 +2534,44 @@ export function initNetworkSystem(world: ECS) {
             Transform.qw[eid] = currentQuat.w;
         }
 
-         // --- Handle Player Model Loading for New Remote Players ---
-         const entered = remotePlayerEnterQuery(w);
-         for (const eid of entered) {
-             const networkId = NetworkId.id[eid];
-             console.log(`Remote player entity ${eid} (NetworkID: ${networkId}) entered query. Setting up model...`);
-             // Ensure the setup runs only once per entity entry
-             if (!world.ctx.maps.mesh.has(eid)) {
+        // --- Handle Player Model Loading for New Remote Players ---
+        const entered = remotePlayerEnterQuery(w);
+        for (const eid of entered) {
+            const networkId = NetworkId.id[eid];
+            console.log(`Remote player entity ${eid} (NetworkID: ${networkId}) entered query. Setting up model...`);
+            // Ensure the setup runs only once per entity entry
+            if (!world.ctx.maps.mesh.has(eid)) {
                 setupRemotePlayerModel(world, world.ctx, eid, networkId);
-             }
-         }
+            }
+        }
 
-         // --- Handle Cleanup for Removed Remote Players ---
-         const exited = remotePlayerExitQuery(w);
-         for (const eid of exited) {
-             console.log(`Remote player entity ${eid} exited query. Cleaning up...`);
-             removeRemotePlayer(world, world.ctx, eid);
-             // The NetworkId mapping is cleaned up in handlePlayerLeft
-         }
+        // --- Handle Cleanup for Removed Remote Players ---
+        const exited = remotePlayerExitQuery(w);
+        for (const eid of exited) {
+            console.log(`Remote player entity ${eid} exited query. Cleaning up...`);
+            removeRemotePlayer(world, world.ctx, eid);
+            // The NetworkId mapping is cleaned up in handlePlayerLeft
+        }
 
-         // --- Ping Server ---
-         if (w.network.connected && now - w.network.lastPingTime > NetworkConfig.PING_INTERVAL_MS) {
-             network.send({ type: 'ping' });
-             w.network.lastPingTime = now;
-         }
-
+        // --- Ping Server ---
+        if (w.network.connected && now - w.network.lastPingTime > NetworkConfig.PING_INTERVAL_MS) {
+            network.send({ type: 'ping' });
+            w.network.lastPingTime = now;
+        }
 
         return w;
     };
 }
-
-// --- Helper Functions ---
-
-// Basic state comparison for delta compression (can be improved)
-// function statesAreEqual(state1: any, state2: any): boolean {
-//     // Simple comparison, needs refinement for floating point numbers and objects
-//     return JSON.stringify(state1) === JSON.stringify(state2);
-// }
 
 async function addRemotePlayer(world: ECS, ctx: ECSContext, playerState: any) {
     if (ctx.localPlayerId === playerState.id) {
         console.warn(`Attempted to add local player ${playerState.id} as remote.`);
         return;
     }
-     if (world.players.has(playerState.id)) {
-         console.warn(`Remote player ${playerState.id} already exists.`);
-         return;
-     }
+    if (world.players.has(playerState.id)) {
+        console.warn(`Remote player ${playerState.id} already exists.`);
+        return;
+    }
 
     const eid = addEntity(world);
     addComponent(world, RemotePlayer, eid);
@@ -2649,27 +2619,42 @@ async function setupRemotePlayerModel(world: ECS, ctx: ECSContext, eid: number, 
         const model = gltf.scene;
 
         model.scale.set(1, 1, 1); // Adjust scale as needed
-        model.position.set(0, -0.9, 0); // Adjust position relative to Transform component
-        model.rotation.y = Math.PI; // Face forward initially
-
+        model.position.set(0, 0, 0); // Position should be at entity center, not offset
+        model.rotation.y = 0; // Don't add rotation - let the transform handle it
+        
         // Add animation mixer if animations exist
         let mixer: THREE.AnimationMixer | null = null;
         if (gltf.animations && gltf.animations.length > 0) {
             mixer = new THREE.AnimationMixer(model);
-            // Store animations/actions if needed for playback later
-             model.userData.animations = gltf.animations; // Store animations raw data
-             model.userData.mixer = mixer;
-             model.userData.actions = {};
-             gltf.animations.forEach(clip => {
-                 const action = mixer!.clipAction(clip);
-                 // Basic setup - needs refinement based on actual animations
-                 action.setLoop(THREE.LoopRepeat);
-                 model.userData.actions[clip.name] = action;
-             });
-             // Start idle animation by default
-             const idleAction = Object.values(model.userData.actions).find((action: any) => action.getClip().name.toLowerCase().includes('idle'));
-             if (idleAction) (idleAction as THREE.AnimationAction).play();
-
+            // Store animations/actions for playback later
+            model.userData.animations = gltf.animations; // Store animations raw data
+            model.userData.mixer = mixer;
+            model.userData.actions = {};
+            
+            gltf.animations.forEach(clip => {
+                // Rename the clips to standardized names for better matching
+                let clipName = clip.name.toLowerCase();
+                let standardName = clip.name;
+                
+                if (clipName.includes('idle')) standardName = 'idle';
+                else if (clipName.includes('walk')) standardName = 'walk';
+                else if (clipName.includes('run')) standardName = 'run';
+                else if (clipName.includes('jump')) {
+                    if (clipName.includes('start')) standardName = 'jump_start';
+                    else if (clipName.includes('fall')) standardName = 'jump_fall';
+                    else standardName = 'jump';
+                }
+                
+                const action = mixer.clipAction(clip);
+                action.setLoop(THREE.LoopRepeat, Infinity);
+                model.userData.actions[standardName] = action;
+                console.log(`Animation loaded for remote player: ${standardName}`);
+            });
+            
+            // Start idle animation by default
+            if (model.userData.actions['idle']) {
+                model.userData.actions['idle'].play();
+            }
         }
 
         model.traverse((child) => {
@@ -2696,26 +2681,26 @@ async function setupRemotePlayerModel(world: ECS, ctx: ECSContext, eid: number, 
     }
 }
 
-
 function removeRemotePlayer(world: ECS, ctx: ECSContext, eid: number) {
     const mesh = ctx.maps.mesh.get(eid);
     if (mesh) {
         // Properly dispose of mesh resources
-         mesh.traverse((child) => {
-             if (child instanceof THREE.Mesh) {
-                 child.geometry?.dispose();
-                 if (child.material) {
-                     if (Array.isArray(child.material)) {
-                         child.material.forEach((mat) => mat.dispose());
-                     } else {
-                         child.material.dispose();
-                     }
-                 }
-             }
-         });
+        mesh.traverse((child) => {
+            if (child instanceof THREE.Mesh) {
+                child.geometry?.dispose();
+                if (child.material) {
+                    if (Array.isArray(child.material)) {
+                        child.material.forEach((mat) => mat.dispose());
+                    } else {
+                        child.material.dispose();
+                    }
+                }
+            }
+        });
         ctx.three.scene.remove(mesh);
         ctx.maps.mesh.delete(eid);
     }
+    
     // Remove Rapier body if it exists (remote players might not have one client-side)
     const rb = ctx.maps.rb.get(eid);
     if (rb) {
@@ -2726,13 +2711,13 @@ function removeRemotePlayer(world: ECS, ctx: ECSContext, eid: number) {
         }
     }
 
-     // Remove the entity itself if it still exists
-     if (hasComponent(world, NetworkId, eid)) { // Check if entity might have been removed already
-         removeEntity(world, eid);
-         console.log(`Removed remote player entity ${eid}`);
-     } else {
-         console.log(`Entity ${eid} already removed or invalid.`);
-     }
+    // Remove the entity itself if it still exists
+    if (hasComponent(world, NetworkId, eid)) { // Check if entity might have been removed already
+        removeEntity(world, eid);
+        console.log(`Removed remote player entity ${eid}`);
+    } else {
+        console.log(`Entity ${eid} already removed or invalid.`);
+    }
 }
 
 ================================================
@@ -2834,23 +2819,41 @@ import { defineQuery, hasComponent } from 'bitecs';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader';
 import {
-    LocalPlayer, RemotePlayer, MeshRef, FPController, Transform, AnimationState, NetworkId // Added components
+    LocalPlayer, RemotePlayer, MeshRef, FPController, Transform, AnimationState, NetworkId
 } from '../../components';
 import { ECS } from '../../world';
 import { MovementState, PlayerAnimationState } from '../../config';
 
-// Store mixers and actions globally or per-entity if needed
-const playerAnimationData = new Map<number, { // Keyed by Entity ID
+// Store animations globally for reuse
+let baseModelLoaded = false;
+let baseModelAnimations: THREE.AnimationClip[] = [];
+
+// Store player animation data per entity
+const playerAnimationData = new Map<number, {
     mixer: THREE.AnimationMixer | null;
     actions: Record<string, THREE.AnimationAction>;
     currentAction: THREE.AnimationAction | null;
     model: THREE.Object3D | null;
 }>();
 
-let baseModelLoaded = false;
-let baseModelAnimations: THREE.AnimationClip[] = []; // Store base animations
+// Try to harmonize animation names across different models
+function getStandardizedAnimationName(clipName: string): string {
+    const name = clipName.toLowerCase();
+    if (name.includes('idle')) return 'idle';
+    if (name.includes('walk')) return 'walk';
+    if (name.includes('run')) return 'run';
+    if (name.includes('jump')) {
+        if (name.includes('start')) return 'jump_start';
+        if (name.includes('fall')) return 'jump_fall';
+        return 'jump';
+    }
+    if (name.includes('shoot')) return 'shoot';
+    if (name.includes('death')) return 'death';
+    // Default to original name if no match
+    return clipName;
+}
 
-// Preload the base model
+// Preload the player model for better load times
 async function preloadBaseModel() {
     if (baseModelLoaded) return;
     console.log("Preloading base player model for animations...");
@@ -2859,90 +2862,88 @@ async function preloadBaseModel() {
         const gltf = await loader.loadAsync('/models/playermodel.glb');
         baseModelAnimations = gltf.animations;
         baseModelLoaded = true;
-        console.log("Base player model animations preloaded.");
+        
+        // Log available animations for debugging
+        console.log("Base animations loaded:");
+        gltf.animations.forEach(clip => {
+            console.log(`- Animation: ${clip.name} (${getStandardizedAnimationName(clip.name)})`);
+        });
     } catch (error) {
         console.error("Failed to preload base player model animations:", error);
     }
 }
-preloadBaseModel(); // Start preloading
+preloadBaseModel();
 
 export function initPlayerAnimationSystem(world: ECS) {
-    // Query for both local and remote players that have meshes
+    // Query for all players that need animations (both local and remote)
     const playerQuery = defineQuery([MeshRef, Transform, AnimationState]);
-    // Query specifically for the local player's controller state
-    const localPlayerControllerQuery = defineQuery([LocalPlayer, FPController]);
+    const localPlayerQuery = defineQuery([LocalPlayer, FPController]);
 
     // --- Helper Functions ---
-    function setupAnimations(eid: number, model: THREE.Object3D) {
-        if (!baseModelLoaded || !model) return; // Ensure base model is loaded
+    
+    /**
+     * Sets up animations for a player entity from the base model animations
+     */
+    function setupPlayerAnimations(eid: number, model: THREE.Object3D) {
+        if (!baseModelLoaded || !model) return;
 
-        // First, find the appropriate node to apply animations to
+        // Find animation root (usually the model itself or an armature/skeleton)
         let animationRoot = model;
-        
-        // Search for armature/skeleton if the model has one
         model.traverse(node => {
-            // Look for Armature, rig, or Skeleton in the name
             if (node.name.toLowerCase().includes('armature') || 
                 node.name.toLowerCase().includes('rig') || 
                 node.name.toLowerCase().includes('skeleton')) {
                 animationRoot = node;
-                return; // Found it, stop traversing
+                return;
             }
         });
 
-        // Create mixer on the appropriate node
+        // Create animation mixer
         const mixer = new THREE.AnimationMixer(animationRoot);
         const actions: Record<string, THREE.AnimationAction> = {};
         
-        // Disable animation logging to prevent console spam about missing bones
-        mixer.clipAction = (function(originalFunction) {
-            return function(clip: THREE.AnimationClip, ...args: any[]) {
-                // Backup and temporarily disable console.error
-                const originalConsoleError = console.error;
-                console.error = function() {}; // Do nothing
-                
-                // Call original function
-                const result = originalFunction.call(this, clip, ...args);
-                
-                // Restore console.error
-                console.error = originalConsoleError;
-                
-                return result;
-            };
-        })(mixer.clipAction) as any;
+        // Disable error logging for missing bones to avoid console spam
+        const originalConsoleError = console.error;
+        console.error = function() {}; // Temporarily suppress errors
 
-        baseModelAnimations.forEach((clip) => {
+        // Process all animations
+        baseModelAnimations.forEach(clip => {
             try {
                 const action = mixer.clipAction(clip);
-                // Default setup: loop repeating animations, clamp others
-                if (clip.name.toLowerCase().includes('idle') || 
-                    clip.name.toLowerCase().includes('walk') || 
-                    clip.name.toLowerCase().includes('run')) {
+                const standardName = getStandardizedAnimationName(clip.name);
+                
+                // Configure action for smooth looping
+                if (standardName === 'idle' || standardName === 'walk' || standardName === 'run') {
                     action.setLoop(THREE.LoopRepeat, Infinity);
                 } else {
                     action.setLoop(THREE.LoopOnce, 1);
                     action.clampWhenFinished = true;
                 }
-                actions[clip.name] = action;
+                
+                actions[standardName] = action;
             } catch (error) {
                 // Silently ignore animation errors
             }
         });
 
-        // Find default idle action
-        const idleActionName = Object.keys(actions).find(name => name.toLowerCase().includes('idle'));
+        // Restore console.error
+        console.error = originalConsoleError;
+
+        // Find default idle action and play it
         let currentAction: THREE.AnimationAction | null = null;
-        if (idleActionName) {
-            currentAction = actions[idleActionName];
+        if (actions['idle']) {
+            currentAction = actions['idle'];
             currentAction.play();
-        } else {
-            console.warn(`No idle animation found for player ${eid}`);
         }
 
+        // Store animation data for this entity
         playerAnimationData.set(eid, { mixer, actions, currentAction, model });
         console.log(`Animation setup complete for player entity ${eid}`);
     }
 
+    /**
+     * Fades smoothly from one animation to another
+     */
     function fadeToAction(eid: number, actionName: string, duration: number = 0.2) {
         const data = playerAnimationData.get(eid);
         if (!data || !data.actions[actionName]) return;
@@ -2953,9 +2954,9 @@ export function initPlayerAnimationSystem(world: ECS) {
         if (previousAction === nextAction) return; // Already playing
 
         nextAction.enabled = true;
-         nextAction.setEffectiveTimeScale(1);
-         nextAction.setEffectiveWeight(1);
-         nextAction.time = 0; // Reset time when fading in
+        nextAction.setEffectiveTimeScale(1);
+        nextAction.setEffectiveWeight(1);
+        nextAction.time = 0; // Reset time when fading in
 
         if (previousAction) {
             previousAction.fadeOut(duration);
@@ -2965,13 +2966,48 @@ export function initPlayerAnimationSystem(world: ECS) {
         data.currentAction = nextAction;
     }
 
-    // System receives world and optionally the local player eid
-    // Modified to iterate over all players and apply animations
-     return (w: ECS, localPlayerEid?: number) => {
+    /**
+     * Creates and attaches a player model to the local player
+     */
+    function createLocalPlayerModel(eid: number) {
+        if (playerAnimationData.has(eid)) return; // Already set up
+        
+        const playerObj = world.ctx.maps.mesh.get(eid);
+        if (!playerObj || !baseModelLoaded) return;
+        
+        console.log("Setting up local player model...");
+        const loader = new GLTFLoader();
+        loader.load('/models/playermodel.glb', (gltf) => {
+            const model = gltf.scene.clone(); // Clone to avoid reference issues
+            
+            // The model should be at the center of the player
+            model.position.set(0, -0.9, 0); // Offset to align with ground
+            
+            // Don't add rotation - let the transform system handle it
+            model.rotation.y = Math.PI; // Face forward by default
 
-        // --- Update Mixers ---
+            // Add model to player holder
+            playerObj.add(model);
+            
+            // Setup animations
+            setupPlayerAnimations(eid, model);
+            
+            console.log("Local player model loaded and attached.");
+        });
+    }
+
+    // System function
+    return (w: ECS, localPlayerEid?: number) => {
+        // --- Check and initialize local player model if needed ---
+        if (localPlayerEid !== undefined && !playerAnimationData.has(localPlayerEid)) {
+            createLocalPlayerModel(localPlayerEid);
+        }
+
+        // --- Update Mixers with delta time ---
         const delta = w.time.dt;
-        playerAnimationData.forEach(data => data.mixer?.update(delta));
+        playerAnimationData.forEach(data => {
+            if (data.mixer) data.mixer.update(delta);
+        });
 
         // --- Determine and Set Animation State for Local Player ---
         if (localPlayerEid !== undefined && hasComponent(w, FPController, localPlayerEid)) {
@@ -2983,75 +3019,97 @@ export function initPlayerAnimationSystem(world: ECS) {
             } else if (moveState === MovementState.FALLING) {
                 targetAnimationState = PlayerAnimationState.FALLING;
             } else if (moveState === MovementState.GROUNDED) {
-                 // Check horizontal velocity magnitude from RigidBody for walking/running
-                 const rb = w.ctx.maps.rb.get(localPlayerEid);
-                 let speedSq = 0;
-                 if (rb) {
-                     const linvel = rb.linvel();
-                     speedSq = linvel.x * linvel.x + linvel.z * linvel.z;
-                 }
+                // Check horizontal velocity magnitude for walking/running
+                const rb = w.ctx.maps.rb.get(localPlayerEid);
+                let speedSq = 0;
+                if (rb) {
+                    const linvel = rb.linvel();
+                    speedSq = linvel.x * linvel.x + linvel.z * linvel.z;
+                }
 
-                if (speedSq > 50) { // Running threshold (adjust as needed)
-                     targetAnimationState = PlayerAnimationState.RUNNING;
+                if (speedSq > 50) { // Running threshold
+                    targetAnimationState = PlayerAnimationState.RUNNING;
                 } else if (speedSq > 0.1) { // Walking threshold
-                     targetAnimationState = PlayerAnimationState.WALKING;
-                 } else {
-                     targetAnimationState = PlayerAnimationState.IDLE;
-                 }
+                    targetAnimationState = PlayerAnimationState.WALKING;
+                } else {
+                    targetAnimationState = PlayerAnimationState.IDLE;
+                }
             }
-             // TODO: Add checks for shooting, aiming based on input or other state
 
-             AnimationState.state[localPlayerEid] = targetAnimationState;
+            // Update animation state component for network sync
+            if (AnimationState.state[localPlayerEid] !== targetAnimationState) {
+                AnimationState.state[localPlayerEid] = targetAnimationState;
+                console.log(`Local animation state changed to: ${targetAnimationState}`);
+            }
         }
-
 
         // --- Apply Animations Based on State for ALL Players ---
         const allPlayers = playerQuery(w);
         for (const eid of allPlayers) {
-             const data = playerAnimationData.get(eid);
-             const model = w.ctx.maps.mesh.get(eid);
-
-             // Setup animations if not done yet (e.g., for newly joined remote players)
-            if (!data && model && baseModelLoaded) {
-                 console.log(`Lazy setup of animations for player entity ${eid}`);
-                 // Find the actual GLTF model node if the map stores a holder
-                 let playerModelNode = model;
-                 if (model.children.length > 0 && model.children[0].type === 'Group') { // Heuristic to find the GLTF scene group
-                    playerModelNode = model.children[0];
-                 }
-                setupAnimations(eid, playerModelNode);
+            const isLocal = localPlayerEid === eid;
+            const data = playerAnimationData.get(eid);
+            
+            // Skip if no animation data yet
+            if (!data) {
+                const model = w.ctx.maps.mesh.get(eid);
+                // Check if this is a remote player model and set it up
+                if (model && baseModelLoaded && hasComponent(w, RemotePlayer, eid)) {
+                    setupPlayerAnimations(eid, model);
+                }
+                continue;
             }
 
-            const animData = playerAnimationData.get(eid); // Get data again after potential setup
-            if (!animData) continue; // Skip if setup failed or model not ready
-
-
+            // Get current animation state
             const currentState = AnimationState.state[eid];
             let targetActionName = 'idle'; // Default animation
 
+            // Convert animation state enum to action name
             switch (currentState) {
-                case PlayerAnimationState.WALKING: targetActionName = 'walk'; break; // Match your GLTF animation names
-                case PlayerAnimationState.RUNNING: targetActionName = 'run'; break; // Match your GLTF animation names
-                case PlayerAnimationState.JUMPING: targetActionName = 'jump_start'; break; // Use appropriate jump animation name
-                case PlayerAnimationState.FALLING: targetActionName = 'jump_fall'; break; // Use appropriate fall animation name
-                case PlayerAnimationState.SHOOTING: targetActionName = 'shoot'; break;
-                case PlayerAnimationState.AIMING: targetActionName = 'aim'; break; // Or aim_idle?
-                case PlayerAnimationState.DEATH: targetActionName = 'death'; break;
+                case PlayerAnimationState.WALKING: 
+                    targetActionName = 'walk'; 
+                    break;
+                case PlayerAnimationState.RUNNING: 
+                    targetActionName = 'run'; 
+                    break;
+                case PlayerAnimationState.JUMPING: 
+                    targetActionName = 'jump_start'; 
+                    break;
+                case PlayerAnimationState.FALLING: 
+                    targetActionName = 'jump_fall'; 
+                    break;
+                case PlayerAnimationState.SHOOTING: 
+                    targetActionName = 'shoot'; 
+                    break;
+                case PlayerAnimationState.DEATH: 
+                    targetActionName = 'death'; 
+                    break;
                 case PlayerAnimationState.IDLE:
-                default: targetActionName = 'idle'; break;
+                default: 
+                    targetActionName = 'idle'; 
+                    break;
             }
 
-            // Find the actual animation name (case-insensitive search)
-            const actionKey = Object.keys(animData.actions).find(key => key.toLowerCase().includes(targetActionName));
-
-            if (actionKey && animData.currentAction !== animData.actions[actionKey]) {
-                fadeToAction(eid, actionKey);
-            } else if (!actionKey) {
-                // Fallback to idle if target animation not found
-                const idleKey = Object.keys(animData.actions).find(key => key.toLowerCase().includes('idle'));
-                if (idleKey && animData.currentAction !== animData.actions[idleKey]) {
-                    fadeToAction(eid, idleKey);
+            // Check if we have this animation or need a fallback
+            if (!data.actions[targetActionName]) {
+                // Fallback logic
+                if (targetActionName === 'run' && data.actions['walk']) {
+                    targetActionName = 'walk';
+                } else if ((targetActionName === 'jump_start' || targetActionName === 'jump_fall') && 
+                           data.actions['jump']) {
+                    targetActionName = 'jump';
+                } else if (!data.actions['idle']) {
+                    // No idle animation - just use first available animation
+                    const firstAction = Object.keys(data.actions)[0];
+                    if (firstAction) targetActionName = firstAction;
+                    else continue; // No animations available
+                } else {
+                    targetActionName = 'idle'; // Default fallback
                 }
+            }
+
+            // Apply animation if different from current
+            if (data.actions[targetActionName] && data.currentAction !== data.actions[targetActionName]) {
+                fadeToAction(eid, targetActionName);
             }
         }
 
@@ -3065,10 +3123,10 @@ File: /src/ecs/systems/player/index.ts
 import { addComponent, addEntity } from 'bitecs';
 import * as THREE from 'three';
 import {
-  MeshRef, RigidBodyRef, Transform, FPController, LocalPlayer, NetworkId, Health, AnimationState // Added multiplayer components
+  MeshRef, RigidBodyRef, Transform, FPController, LocalPlayer, NetworkId, Health, AnimationState
 } from '../../components';
 import { ECS } from '../../world';
-import { MovementState, PlayerAnimationState, PlayerConfig } from '../../config'; // Added PlayerAnimationState
+import { MovementState, PlayerAnimationState, PlayerConfig } from '../../config';
 import { initPlayerMovementSystem } from './movementSystem';
 import { initPlayerLookSystem } from './lookSystem';
 import { initPlayerShootSystem } from './shootSystem';
@@ -3085,34 +3143,33 @@ export function initPlayerSystem(world: ECS) {
   addComponent(world, MeshRef,        pid);
   addComponent(world, RigidBodyRef,   pid);
   addComponent(world, FPController,   pid);
-  addComponent(world, Health,         pid); // Add Health component
-  addComponent(world, AnimationState, pid); // Add AnimationState component
+  addComponent(world, Health,         pid);
+  addComponent(world, AnimationState, pid);
 
   NetworkId.id[pid] = 0; // Placeholder ID, server will assign correct one
   Health.current[pid] = PlayerConfig.MAX_HEALTH;
   Health.max[pid] = PlayerConfig.MAX_HEALTH;
   AnimationState.state[pid] = PlayerAnimationState.IDLE; // Start in Idle state
 
-  // Initialize controller state (same as before)
+  // Initialize controller state
   FPController.pitch[pid] = 0;
   FPController.vertVel[pid] = 0;
   FPController.moveState[pid] = MovementState.GROUNDED;
   FPController.lastGrounded[pid] = performance.now();
   FPController.lastJump[pid] = 0;
-  // FPController.lastShot removed - handled by server/network
   FPController.jumpRequested[pid] = 0;
   FPController.lastJumpRequest[pid] = 0;
 
   // --- Mesh Holder ---
   const holder = new THREE.Object3D();
   // Start position might be overridden by server 'init' message
-  holder.position.set(0, 20, 10); // Start much higher above the cube stack
+  holder.position.set(0, 10, 0); // Start higher above the ground to prevent falling through
   three.scene.add(holder);
   maps.mesh.set(pid, holder); // Associate entity ID with the holder mesh
 
   // Camera setup inside the holder
   const cameraOffset = new THREE.Object3D();
-  cameraOffset.position.set(0, 0.7, 0); // Eye height relative to holder's base (adjust from 1.6)
+  cameraOffset.position.set(0, 1.7, 0); // Eye height - slightly higher than model head
   holder.add(cameraOffset);
   cameraOffset.add(three.camera);
 
@@ -3122,10 +3179,11 @@ export function initPlayerSystem(world: ECS) {
           .setTranslation(holder.position.x, holder.position.y, holder.position.z)
           .setCcdEnabled(true) // Keep CCD enabled for player potentially
   );
+  
+  // Create a slightly smaller capsule collider to avoid getting stuck
   const collider = physics.createCollider(
-    // Slightly thinner capsule collider
     rapier.ColliderDesc.capsule(0.8, 0.3) // Height 0.8, Radius 0.3
-      .setFriction(0.1) // Lower friction
+      .setFriction(0.1)
       .setDensity(1.0), // Set density for KCC interactions
     rb
   );
@@ -3152,7 +3210,6 @@ export function initPlayerSystem(world: ECS) {
       world.ctx.entityHandleMap.set(rb.handle, pid);
   }
 
-
   // Initialize sub-systems
   const movementSystem = initPlayerMovementSystem(world);
   const lookSystem = initPlayerLookSystem(world);
@@ -3161,17 +3218,24 @@ export function initPlayerSystem(world: ECS) {
 
   // Combined system - runs sub-systems *only* for the local player
   return (w: ECS) => {
-    const localPlayers = world.players.get(w.ctx.localPlayerId!);
-    if (localPlayers !== undefined) { // Check if the local player entity exists
-        const localEid = localPlayers;
+    // Get local player entity ID from network if available, otherwise use the initial one
+    const localEid = w.ctx.localPlayerId !== null ? 
+      world.players.get(w.ctx.localPlayerId!) : pid;
+    
+    if (localEid !== undefined) {
         // Run systems specifically for the local player entity
         lookSystem(w, localEid);
         movementSystem(w, localEid);
         shootSystem(w, localEid);
         animationSystem(w, localEid); // Animation system needs to run for local player
+    } else {
+        // Fallback in case network hasn't initialized player ID yet
+        lookSystem(w, pid);
+        movementSystem(w, pid);
+        shootSystem(w, pid);
+        animationSystem(w, pid);
     }
-     // Animation system might also need to run for remote players separately
-     // Consider moving remote player animation updates to RenderSync or a dedicated system
+    
     return w;
   };
 }
@@ -3263,13 +3327,12 @@ export function initPlayerLookSystem(_world: ECS) {
 ================================================
 File: /src/ecs/systems/player/movementSystem.ts
 ================================================
-import { defineQuery, hasComponent } from 'bitecs';
-import { LocalPlayer, RigidBodyRef, FPController, Transform } from '../../components'; // Added Transform
+import { FPController, Transform } from '../../components';
 import { ECS } from '../../world';
 import { InputState } from '../input';
 import { vec2Pool, vec3Pool } from '../../utils/mathUtils';
 import { PlayerConfig, MovementState } from '../../config';
-import * as THREE from 'three'; // Import THREE
+import * as THREE from 'three';
 
 // Removed playerQuery, system now receives eid
 // const playerQuery = defineQuery([LocalPlayer, RigidBodyRef, FPController]);
@@ -3296,10 +3359,27 @@ export function initPlayerMovementSystem(_world: ECS) {
     const holder = w.ctx.maps.mesh.get(eid); // Player's visual holder mesh
     if (!holder) return w;
 
+    // Debugging: Log collider position relative to body
+    const colliderPosition = playerCollider.translation();
+    const rbPosition = rb.translation();
+    const offset = { 
+      x: colliderPosition.x - rbPosition.x,
+      y: colliderPosition.y - rbPosition.y, 
+      z: colliderPosition.z - rbPosition.z 
+    };
+    
+    // If offset is unusually large, something's wrong - reset it
+    if (Math.abs(offset.y) > 1) {
+      console.warn(`Fixed collider-body offset, was: ${JSON.stringify(offset)}`);
+      playerCollider.setTranslation(rbPosition);
+    }
+
     // --- Movement state + gravity ---
+    // Use KCC to check if grounded
     const grounded = kcc.computedGrounded();
     if (grounded) FPController.lastGrounded[eid] = now;
 
+    // Set movement state based on grounded and vertical velocity
     if (grounded) {
       FPController.moveState[eid] = MovementState.GROUNDED;
     } else {
@@ -3316,17 +3396,20 @@ export function initPlayerMovementSystem(_world: ECS) {
       FPController.jumpRequested[eid] = 0;
     }
 
+    // Check if can jump using coyote time (grace period after leaving edge)
     const canJump = (grounded || now - FPController.lastGrounded[eid] < PlayerConfig.COYOTE_MS) &&
                     now - FPController.lastJump[eid] > PlayerConfig.JUMP_CD_MS;
 
+    // Execute jump with buffering
     if (canJump && (jumpPressed || (now - FPController.lastJumpRequest[eid] < PlayerConfig.JUMP_BUFFER_MS))) {
       FPController.vertVel[eid] = PlayerConfig.JUMP_VEL;
       FPController.lastJump[eid] = now;
       FPController.jumpRequested[eid] = 0;
+      console.log("JUMP EXECUTED!");
     }
     prevJump = input.jump;
 
-    // Apply gravity
+    // Apply gravity or stick to ground
     if (FPController.moveState[eid] !== MovementState.GROUNDED) {
       FPController.vertVel[eid] = Math.max(
         FPController.vertVel[eid] - PlayerConfig.GRAVITY * w.time.dt,
@@ -3337,12 +3420,11 @@ export function initPlayerMovementSystem(_world: ECS) {
       FPController.vertVel[eid] = -2.0; // Small negative velocity when grounded
     }
 
-
     // --- Directional input ---
     dir.set(
-      (input.rt ? 1 : 0) - (input.lf ? 1 : 0),
-      0,
-      (input.bk ? 1 : 0) - (input.fw ? 1 : 0)
+      (input.rt ? 1 : 0) - (input.lf ? 1 : 0), // x: right - left
+      0,                                        // y: always zero
+      (input.bk ? 1 : 0) - (input.fw ? 1 : 0)  // z: backward - forward
     );
 
     if (dir.lengthSq() > 0) dir.normalize();
@@ -3351,8 +3433,7 @@ export function initPlayerMovementSystem(_world: ECS) {
     const playerRotation = new THREE.Quaternion(Transform.qx[eid], Transform.qy[eid], Transform.qz[eid], Transform.qw[eid]);
     dir.applyQuaternion(playerRotation);
 
-
-    // Base speed
+    // Base speed with sprint and air control
     const speed = PlayerConfig.WALK_SPEED *
                   (FPController.moveState[eid] === MovementState.GROUNDED ? 1 : PlayerConfig.AIR_CONTROL) *
                   (input.sprint ? PlayerConfig.SPRINT_FACTOR : 1);
@@ -3368,8 +3449,16 @@ export function initPlayerMovementSystem(_world: ECS) {
       z: horiz.y * dt
     };
 
-    kcc.computeColliderMovement(playerCollider, desiredMovement);
+    // Debug logging for movement issues
+    if (!isFinite(desiredMovement.x) || !isFinite(desiredMovement.y) || !isFinite(desiredMovement.z)) {
+      console.error("Invalid movement values:", desiredMovement);
+      desiredMovement.x = 0;
+      desiredMovement.y = 0;
+      desiredMovement.z = 0;
+    }
 
+    // Apply character controller movement
+    kcc.computeColliderMovement(playerCollider, desiredMovement);
     const actualMovement = kcc.computedMovement();
 
     // Check for head collision
@@ -3379,20 +3468,21 @@ export function initPlayerMovementSystem(_world: ECS) {
 
     // Apply the computed movement to the rigid body for the next physics step
     const currentPos = rb.translation();
+    
+    // Ensure the collider moves with the rigid body
     rb.setNextKinematicTranslation({
       x: currentPos.x + actualMovement.x,
       y: currentPos.y + actualMovement.y,
       z: currentPos.z + actualMovement.z
     });
 
-    // Update the Transform component immediately for RenderSync interpolation base
+    // Update the Transform component immediately for network sync and rendering
     Transform.x[eid] = currentPos.x + actualMovement.x;
     Transform.y[eid] = currentPos.y + actualMovement.y;
     Transform.z[eid] = currentPos.z + actualMovement.z;
 
-    // Note: RenderSync will handle interpolating the *visual* mesh (`holder`)
-    // based on the RigidBody's state across physics steps. We update Transform
-    // here to reflect the result of this frame's input processing.
+    // Check for ground state and update animation if needed
+    // We'll apply animations in the animation system, but calculate the state here
 
     return w;
   };
@@ -3403,7 +3493,7 @@ File: /src/ecs/systems/player/shootSystem.ts
 ================================================
 import { defineQuery, hasComponent, addEntity, addComponent } from 'bitecs';
 import * as THREE from 'three';
-import { LocalPlayer, FPController, Transform, Projectile, Lifespan, MeshRef, Velocity } from '../../components'; // Import required components
+import { LocalPlayer, FPController, Transform, Projectile, Lifespan, MeshRef, Velocity, RigidBodyRef } from '../../components'; // Import required components
 import { ECS } from '../../world';
 import { InputState } from '../input';
 import { network } from '../network/client'; // Import network client
@@ -3413,10 +3503,9 @@ import { vec3Pool } from '../../utils/mathUtils'; // Keep for direction calculat
 // Removed playerQuery, system now receives eid
 // const playerQuery = defineQuery([LocalPlayer, FPController]);
 
-// Server now dictates shoot cooldown, remove client-side tracking?
-// Keeping prevShoot for detecting button press vs hold
+// Server now dictates shoot cooldown, but we keep local tracking for client-side feedback
 let prevShoot = false;
-let lastShotTime = 0; // Use a local timestamp for basic client-side feedback delay if needed
+let lastShotTime = 0; // Client-side visual feedback delay
 
 export function initPlayerShootSystem(_world: ECS) {
 
@@ -3445,18 +3534,17 @@ export function initPlayerShootSystem(_world: ECS) {
             // Spawn slightly in front of camera, aligned with view
             camera.getWorldPosition(spawnPos).addScaledVector(dir, WeaponConfig.BULLET_SPAWN_DISTANCE);
 
-
             console.log(`Local player ${w.ctx.localPlayerId} shooting.`);
-            // Send shoot message to the server
+            
+            // Send shoot message to the server - important for multiplayer sync
             network.send({
                 type: 'shoot',
                 position: { x: spawnPos.x, y: spawnPos.y, z: spawnPos.z },
                 direction: { x: dir.x, y: dir.y, z: dir.z }
             });
 
-            // --- Spawn Local Projectile ---
-            // Create a real projectile with physics and proper lifetime
-            spawnProjectile(w, spawnPos, dir);
+            // Create a physics-based projectile for proper world interaction
+            const projectileEid = createPhysicsProjectile(w, spawnPos, dir);
 
             lastShotTime = now; // Update client-side timer
 
@@ -3470,13 +3558,22 @@ export function initPlayerShootSystem(_world: ECS) {
     };
 }
 
-
-// Helper to spawn a real projectile with physics
-function spawnProjectile(world: ECS, position: THREE.Vector3, direction: THREE.Vector3) {
+/**
+ * Creates a physics-based projectile with both visual representation and rigid body physics
+ * @param world - ECS world instance
+ * @param position - Starting position vector
+ * @param direction - Direction vector (should be normalized)
+ * @returns Entity ID of the created projectile
+ */
+function createPhysicsProjectile(world: ECS, position: THREE.Vector3, direction: THREE.Vector3): number {
+    const { rapier, physics, maps, three } = world.ctx;
+    
+    // Create projectile entity
     const eid = addEntity(world);
     addComponent(world, Projectile, eid);
     addComponent(world, Lifespan, eid);
     addComponent(world, MeshRef, eid);
+    addComponent(world, RigidBodyRef, eid);
     addComponent(world, Transform, eid);
     addComponent(world, Velocity, eid);
     
@@ -3498,7 +3595,80 @@ function spawnProjectile(world: ECS, position: THREE.Vector3, direction: THREE.V
     // Create visual mesh
     const mesh = new THREE.Mesh(
         new THREE.SphereGeometry(0.08, 8, 8),
-        new THREE.MeshBasicMaterial({ color: 0xff4400 })
+        new THREE.MeshStandardMaterial({ 
+            color: 0xff4400,
+            emissive: 0xff2200,
+            emissiveIntensity: 0.4,
+            roughness: 0.3,
+            metalness: 0.7
+        })
+    );
+    mesh.castShadow = true;
+    mesh.position.copy(position);
+    three.scene.add(mesh);
+    maps.mesh.set(eid, mesh);
+    
+    // Create physics rigid body with CCD enabled to prevent tunneling
+    const rb = physics.createRigidBody(
+        rapier.RigidBodyDesc.dynamic()
+            .setTranslation(position.x, position.y, position.z)
+            .setCcdEnabled(true) // Critical for fast projectiles to prevent tunneling
+            .setLinvel(direction.x * WeaponConfig.BULLET_SPEED, 
+                      direction.y * WeaponConfig.BULLET_SPEED, 
+                      direction.z * WeaponConfig.BULLET_SPEED)
+    );
+    
+    // Create bullet collider
+    physics.createCollider(
+        rapier.ColliderDesc.ball(0.08) // Match visual size
+            .setDensity(2.0)
+            .setFriction(0.0)
+            .setRestitution(0.4), // Bounce off surfaces slightly
+        rb
+    );
+    
+    // Store rigid body and update entity-handle mapping
+    maps.rb.set(eid, rb);
+    RigidBodyRef.id[eid] = rb.handle;
+    
+    // Update entity handle map for collision detection
+    if (world.ctx.entityHandleMap) {
+        world.ctx.entityHandleMap.set(rb.handle, eid);
+    } else {
+        world.ctx.entityHandleMap = new Map<number, number>();
+        world.ctx.entityHandleMap.set(rb.handle, eid);
+    }
+    
+    return eid;
+}
+
+/** 
+ * Creates a visual-only projectile for remote player shots
+ * Used by network system when receiving shot events from other players
+ */
+export function createVisualProjectile(world: ECS, position: THREE.Vector3, direction: THREE.Vector3, color = 0x00aaff): number {
+    const eid = addEntity(world);
+    addComponent(world, Projectile, eid);
+    addComponent(world, Lifespan, eid);
+    addComponent(world, MeshRef, eid);
+    addComponent(world, Transform, eid);
+    addComponent(world, Velocity, eid);
+    
+    Lifespan.ttl[eid] = WeaponConfig.BULLET_TTL_MS;
+    Lifespan.born[eid] = performance.now();
+    
+    Transform.x[eid] = position.x;
+    Transform.y[eid] = position.y;
+    Transform.z[eid] = position.z;
+    Transform.qx[eid] = 0; Transform.qy[eid] = 0; Transform.qz[eid] = 0; Transform.qw[eid] = 1;
+    
+    Velocity.x[eid] = direction.x * WeaponConfig.BULLET_SPEED;
+    Velocity.y[eid] = direction.y * WeaponConfig.BULLET_SPEED;
+    Velocity.z[eid] = direction.z * WeaponConfig.BULLET_SPEED;
+    
+    const mesh = new THREE.Mesh(
+        new THREE.SphereGeometry(0.08, 8, 8),
+        new THREE.MeshBasicMaterial({ color })
     );
     mesh.position.copy(position);
     world.ctx.three.scene.add(mesh);
@@ -3511,12 +3681,17 @@ function spawnProjectile(world: ECS, position: THREE.Vector3, direction: THREE.V
 File: /src/ecs/systems/projectile.ts
 ================================================
 import { defineQuery, hasComponent, removeEntity } from 'bitecs';
-import { Lifespan, Projectile, Velocity, Transform, MeshRef } from '../components'; // Added Velocity, Transform, MeshRef
+import { Lifespan, Projectile, Velocity, Transform, MeshRef, RigidBodyRef } from '../components';
 import { ECS } from '../world';
 import * as THREE from 'three';
 
 export function initProjectileSystem(_world: ECS) {
-  const projectileQuery = defineQuery([Projectile, Lifespan, Velocity, Transform, MeshRef]);
+  // Query for all projectiles, whether physics-based or visual-only
+  const projectileQuery = defineQuery([Projectile, Lifespan]);
+  
+  // Separate query for visual-only projectiles (those without RigidBody)
+  const visualProjectileQuery = defineQuery([Projectile, Lifespan, Velocity, Transform, MeshRef]);
+  const physicsProjectileQuery = defineQuery([Projectile, Lifespan, RigidBodyRef]);
 
   return (w: ECS) => {
     const now = performance.now();
@@ -3524,64 +3699,81 @@ export function initProjectileSystem(_world: ECS) {
 
     const entitiesToRemove: number[] = [];
 
+    // First update visual-only projectiles with simple kinematic movement
+    for (const eid of visualProjectileQuery(w)) {
+      // Skip if entity already has a RigidBody (will be handled by physics system)
+      if (hasComponent(w, RigidBodyRef, eid)) continue;
+      
+      // --- Simple Kinematic Movement ---
+      Transform.x[eid] += Velocity.x[eid] * delta;
+      Transform.y[eid] += Velocity.y[eid] * delta;
+      Transform.z[eid] += Velocity.z[eid] * delta;
+
+      // Sync mesh position with Transform
+      const mesh = w.ctx.maps.mesh.get(eid);
+      if (mesh) {
+        mesh.position.set(Transform.x[eid], Transform.y[eid], Transform.z[eid]);
+      }
+    }
+
+    // Check all projectiles for lifespan and deletion flags
     for (const eid of projectileQuery(w)) {
-        // --- Simple Kinematic Movement ---
-        Transform.x[eid] += Velocity.x[eid] * delta;
-        Transform.y[eid] += Velocity.y[eid] * delta;
-        Transform.z[eid] += Velocity.z[eid] * delta;
+      // --- Check Lifespan ---
+      if (now - Lifespan.born[eid] > Lifespan.ttl[eid]) {
+        entitiesToRemove.push(eid);
+        continue;
+      }
 
-        // Sync mesh position with Transform
-        const mesh = w.ctx.maps.mesh.get(eid);
-        if (mesh) {
-            mesh.position.set(Transform.x[eid], Transform.y[eid], Transform.z[eid]);
+      // --- Check for Deletion Flag (from collision detection) ---
+      const mesh = w.ctx.maps.mesh.get(eid);
+      if (mesh?.userData?.markedForDeletion === true) {
+        if (!entitiesToRemove.includes(eid)) { // Avoid duplicates
+          entitiesToRemove.push(eid);
         }
-
-        // --- Check Lifespan ---
-        if (now - Lifespan.born[eid] > Lifespan.ttl[eid]) {
-            entitiesToRemove.push(eid);
-        }
-
-        // --- Check for Deletion Flag (from potential client-side collision effects) ---
-        // Note: Authoritative collision comes from server now.
-        // This flag might be set by local effects if desired.
-         if (mesh?.userData?.markedForDeletion === true) {
-             if (!entitiesToRemove.includes(eid)) { // Avoid duplicates
-                 entitiesToRemove.push(eid);
-             }
-         }
+      }
     }
 
     // --- Remove Entities ---
     for (const eid of entitiesToRemove) {
-        // Get and remove the mesh
-        const mesh = w.ctx.maps.mesh.get(eid);
-        if (mesh) {
-            w.ctx.three.scene.remove(mesh);
-            if (mesh instanceof THREE.Mesh) {
-                mesh.geometry?.dispose();
-                if (mesh.material) {
-                     if (Array.isArray(mesh.material)) {
-                         mesh.material.forEach(material => material?.dispose());
-                     } else {
-                         mesh.material.dispose();
-                     }
-                }
+      // Get and remove the mesh
+      const mesh = w.ctx.maps.mesh.get(eid);
+      if (mesh) {
+        w.ctx.three.scene.remove(mesh);
+        if (mesh instanceof THREE.Mesh) {
+          mesh.geometry?.dispose();
+          if (mesh.material) {
+            if (Array.isArray(mesh.material)) {
+              mesh.material.forEach(material => material?.dispose());
+            } else {
+              mesh.material.dispose();
             }
-            w.ctx.maps.mesh.delete(eid);
+          }
         }
+        w.ctx.maps.mesh.delete(eid);
+      }
 
-        // Remove Rapier body if it existed (shouldn't for visual bullets)
-        const rb = w.ctx.maps.rb.get(eid);
-        if (rb) {
-            console.warn(`Removing unexpected RigidBody for visual projectile ${eid}`);
-            w.ctx.physics.removeRigidBody(rb);
-            w.ctx.maps.rb.delete(eid);
+      // Remove Rapier body if it exists
+      const rb = w.ctx.maps.rb.get(eid);
+      if (rb) {
+        w.ctx.physics.removeRigidBody(rb);
+        w.ctx.maps.rb.delete(eid);
+        
+        // Also remove from entity handle map if it exists
+        if (w.ctx.entityHandleMap) {
+          // Search for this entity's handle
+          for (const [handle, entityId] of w.ctx.entityHandleMap.entries()) {
+            if (entityId === eid) {
+              w.ctx.entityHandleMap.delete(handle);
+              break;
+            }
+          }
         }
+      }
 
-        // Remove the entity if it still exists
-         if (hasComponent(w, Projectile, eid)) {
-            removeEntity(w, eid);
-         }
+      // Remove the entity if it still exists
+      if (hasComponent(w, Projectile, eid)) {
+        removeEntity(w, eid);
+      }
     }
 
     return w;

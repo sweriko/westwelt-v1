@@ -22,7 +22,7 @@ export const FPController = defineComponent({
   moveState: Types.ui8,    // 0=Grounded, 1=Jumping, 2=Falling
   lastGrounded: Types.f32, // Time when last grounded
   lastJump: Types.f32,     // Time when last jumped
-  // lastShot removed, handled by network/server now
+  lastShot: Types.f32,     // Time when last shot
   jumpRequested: Types.ui8,// Jump buffer flag
   lastJumpRequest: Types.f32 // Time when jump was requested
 });
@@ -49,6 +49,7 @@ export const MeshRef      = defineComponent({ id: Types.ui32 });
 
 /** Tags */
 // Player tag is now split into LocalPlayer and RemotePlayer
+export const Player = defineComponent();
 export const Projectile = defineComponent();
 export const CubeTag    = defineComponent();
 

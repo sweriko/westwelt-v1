@@ -1,228 +1,279 @@
-import { defineQuery, hasComponent } from 'bitecs';
+/**
+ * Player animation system - handles player model loading, animation states and transitions
+ */
+import { defineQuery } from 'bitecs';
 import * as THREE from 'three';
-import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader';
-import {
-    LocalPlayer, RemotePlayer, MeshRef, FPController, Transform, AnimationState, NetworkId // Added components
-} from '../../components';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { Player, LocalPlayer, MeshRef, FPController } from '../../components';
 import { ECS } from '../../world';
-import { MovementState, PlayerAnimationState } from '../../config';
+import { MovementState } from '../../config';
 
-// Store mixers and actions globally or per-entity if needed
-const playerAnimationData = new Map<number, { // Keyed by Entity ID
-    mixer: THREE.AnimationMixer | null;
-    actions: Record<string, THREE.AnimationAction>;
-    currentAction: THREE.AnimationAction | null;
-    model: THREE.Object3D | null;
-}>();
-
-let baseModelLoaded = false;
-let baseModelAnimations: THREE.AnimationClip[] = []; // Store base animations
-
-// Preload the base model
-async function preloadBaseModel() {
-    if (baseModelLoaded) return;
-    console.log("Preloading base player model for animations...");
-    const loader = new GLTFLoader();
-    try {
-        const gltf = await loader.loadAsync('/models/playermodel.glb');
-        baseModelAnimations = gltf.animations;
-        baseModelLoaded = true;
-        console.log("Base player model animations preloaded.");
-    } catch (error) {
-        console.error("Failed to preload base player model animations:", error);
-    }
-}
-preloadBaseModel(); // Start preloading
+// Animation state constants
+const AnimationState = {
+    IDLE: 'idle',
+    WALKING: 'walking'
+};
 
 export function initPlayerAnimationSystem(world: ECS) {
-    // Query for both local and remote players that have meshes
-    const playerQuery = defineQuery([MeshRef, Transform, AnimationState]);
-    // Query specifically for the local player's controller state
-    const localPlayerControllerQuery = defineQuery([LocalPlayer, FPController]);
-
-    // --- Helper Functions ---
-    function setupAnimations(eid: number, model: THREE.Object3D) {
-        if (!baseModelLoaded || !model) return; // Ensure base model is loaded
-
-        // First, find the appropriate node to apply animations to
-        let animationRoot = model;
+    // Query for either Player or LocalPlayer entities with required components
+    const playerQuery = defineQuery([Player, MeshRef, FPController]);
+    const localPlayerQuery = defineQuery([LocalPlayer, MeshRef, FPController]);
+    
+    // Animation variables
+    let playerModel: THREE.Group | null = null;
+    let mixer: THREE.AnimationMixer | null = null;
+    let animations: Map<string, THREE.AnimationAction> = new Map();
+    let currentAnimation: string | null = null;
+    let activeAction: THREE.AnimationAction | null = null;
+    
+    // Movement tracking
+    let movementState = "idle"; // Current movement state: "idle" or "walking"
+    let movementTimer = 0; // Timer to prevent rapid state changes
+    let movementBuffer = [false, false, false, false, false]; // Buffer last 5 movement samples
+    let bufferIndex = 0;
+    
+    // Regular check to ensure animation is playing
+    let animationCheckTimer = 0;
+    
+    // Load player model
+    const loader = new GLTFLoader();
+    loader.load('/models/playermodel.glb', (gltf) => {
+        console.log('Player model loaded:', gltf);
         
-        // Search for armature/skeleton if the model has one
-        model.traverse(node => {
-            // Look for Armature, rig, or Skeleton in the name
-            if (node.name.toLowerCase().includes('armature') || 
-                node.name.toLowerCase().includes('rig') || 
-                node.name.toLowerCase().includes('skeleton')) {
-                animationRoot = node;
-                return; // Found it, stop traversing
-            }
-        });
-
-        // Create mixer on the appropriate node
-        const mixer = new THREE.AnimationMixer(animationRoot);
-        const actions: Record<string, THREE.AnimationAction> = {};
+        // Store the model for later use
+        playerModel = gltf.scene;
         
-        // Disable animation logging to prevent console spam about missing bones
-        mixer.clipAction = (function(originalFunction) {
-            return function(clip: THREE.AnimationClip, ...args: any[]) {
-                // Backup and temporarily disable console.error
-                const originalConsoleError = console.error;
-                console.error = function() {}; // Do nothing
-                
-                // Call original function
-                const result = originalFunction.call(this, clip, ...args);
-                
-                // Restore console.error
-                console.error = originalConsoleError;
-                
-                return result;
-            };
-        })(mixer.clipAction) as any;
-
-        baseModelAnimations.forEach((clip) => {
-            try {
+        // Set up animation mixer
+        mixer = new THREE.AnimationMixer(playerModel);
+        
+        // Process animations
+        gltf.animations.forEach((clip) => {
+            // Create actions for each animation clip
+            if (mixer) {
                 const action = mixer.clipAction(clip);
-                // Default setup: loop repeating animations, clamp others
-                if (clip.name.toLowerCase().includes('idle') || 
-                    clip.name.toLowerCase().includes('walk') || 
-                    clip.name.toLowerCase().includes('run')) {
-                    action.setLoop(THREE.LoopRepeat, Infinity);
+                
+                // Store by name for easier access
+                if (clip.name.toLowerCase().includes('idle')) {
+                    animations.set(AnimationState.IDLE, action);
+                    console.log(`Animation loaded: ${clip.name} (IDLE)`);
+                } else if (clip.name.toLowerCase().includes('walk')) {
+                    animations.set(AnimationState.WALKING, action);
+                    console.log(`Animation loaded: ${clip.name} (WALKING)`);
                 } else {
-                    action.setLoop(THREE.LoopOnce, 1);
-                    action.clampWhenFinished = true;
+                    console.log(`Other animation loaded: ${clip.name}`);
                 }
-                actions[clip.name] = action;
-            } catch (error) {
-                // Silently ignore animation errors
             }
         });
-
-        // Find default idle action
-        const idleActionName = Object.keys(actions).find(name => name.toLowerCase().includes('idle'));
-        let currentAction: THREE.AnimationAction | null = null;
-        if (idleActionName) {
-            currentAction = actions[idleActionName];
-            currentAction.play();
-        } else {
-            console.warn(`No idle animation found for player ${eid}`);
-        }
-
-        playerAnimationData.set(eid, { mixer, actions, currentAction, model });
-        console.log(`Animation setup complete for player entity ${eid}`);
-    }
-
-    function fadeToAction(eid: number, actionName: string, duration: number = 0.2) {
-        const data = playerAnimationData.get(eid);
-        if (!data || !data.actions[actionName]) return;
-
-        const nextAction = data.actions[actionName];
-        const previousAction = data.currentAction;
-
-        if (previousAction === nextAction) return; // Already playing
-
-        nextAction.enabled = true;
-         nextAction.setEffectiveTimeScale(1);
-         nextAction.setEffectiveWeight(1);
-         nextAction.time = 0; // Reset time when fading in
-
-        if (previousAction) {
-            previousAction.fadeOut(duration);
-        }
-
-        nextAction.reset().fadeIn(duration).play();
-        data.currentAction = nextAction;
-    }
-
-    // System receives world and optionally the local player eid
-    // Modified to iterate over all players and apply animations
-     return (w: ECS, localPlayerEid?: number) => {
-
-        // --- Update Mixers ---
-        const delta = w.time.dt;
-        playerAnimationData.forEach(data => data.mixer?.update(delta));
-
-        // --- Determine and Set Animation State for Local Player ---
-        if (localPlayerEid !== undefined && hasComponent(w, FPController, localPlayerEid)) {
-            const moveState = FPController.moveState[localPlayerEid];
-            let targetAnimationState = PlayerAnimationState.IDLE;
-
-            if (moveState === MovementState.JUMPING) {
-                targetAnimationState = PlayerAnimationState.JUMPING;
-            } else if (moveState === MovementState.FALLING) {
-                targetAnimationState = PlayerAnimationState.FALLING;
-            } else if (moveState === MovementState.GROUNDED) {
-                 // Check horizontal velocity magnitude from RigidBody for walking/running
-                 const rb = w.ctx.maps.rb.get(localPlayerEid);
-                 let speedSq = 0;
-                 if (rb) {
-                     const linvel = rb.linvel();
-                     speedSq = linvel.x * linvel.x + linvel.z * linvel.z;
-                 }
-
-                if (speedSq > 50) { // Running threshold (adjust as needed)
-                     targetAnimationState = PlayerAnimationState.RUNNING;
-                } else if (speedSq > 0.1) { // Walking threshold
-                     targetAnimationState = PlayerAnimationState.WALKING;
-                 } else {
-                     targetAnimationState = PlayerAnimationState.IDLE;
-                 }
-            }
-             // TODO: Add checks for shooting, aiming based on input or other state
-
-             AnimationState.state[localPlayerEid] = targetAnimationState;
-        }
-
-
-        // --- Apply Animations Based on State for ALL Players ---
-        const allPlayers = playerQuery(w);
-        for (const eid of allPlayers) {
-             const data = playerAnimationData.get(eid);
-             const model = w.ctx.maps.mesh.get(eid);
-
-             // Setup animations if not done yet (e.g., for newly joined remote players)
-            if (!data && model && baseModelLoaded) {
-                 console.log(`Lazy setup of animations for player entity ${eid}`);
-                 // Find the actual GLTF model node if the map stores a holder
-                 let playerModelNode = model;
-                 if (model.children.length > 0 && model.children[0].type === 'Group') { // Heuristic to find the GLTF scene group
-                    playerModelNode = model.children[0];
-                 }
-                setupAnimations(eid, playerModelNode);
-            }
-
-            const animData = playerAnimationData.get(eid); // Get data again after potential setup
-            if (!animData) continue; // Skip if setup failed or model not ready
-
-
-            const currentState = AnimationState.state[eid];
-            let targetActionName = 'idle'; // Default animation
-
-            switch (currentState) {
-                case PlayerAnimationState.WALKING: targetActionName = 'walk'; break; // Match your GLTF animation names
-                case PlayerAnimationState.RUNNING: targetActionName = 'run'; break; // Match your GLTF animation names
-                case PlayerAnimationState.JUMPING: targetActionName = 'jump_start'; break; // Use appropriate jump animation name
-                case PlayerAnimationState.FALLING: targetActionName = 'jump_fall'; break; // Use appropriate fall animation name
-                case PlayerAnimationState.SHOOTING: targetActionName = 'shoot'; break;
-                case PlayerAnimationState.AIMING: targetActionName = 'aim'; break; // Or aim_idle?
-                case PlayerAnimationState.DEATH: targetActionName = 'death'; break;
-                case PlayerAnimationState.IDLE:
-                default: targetActionName = 'idle'; break;
-            }
-
-            // Find the actual animation name (case-insensitive search)
-            const actionKey = Object.keys(animData.actions).find(key => key.toLowerCase().includes(targetActionName));
-
-            if (actionKey && animData.currentAction !== animData.actions[actionKey]) {
-                fadeToAction(eid, actionKey);
-            } else if (!actionKey) {
-                // Fallback to idle if target animation not found
-                const idleKey = Object.keys(animData.actions).find(key => key.toLowerCase().includes('idle'));
-                if (idleKey && animData.currentAction !== animData.actions[idleKey]) {
-                    fadeToAction(eid, idleKey);
+        
+        // Configure all animations
+        animations.forEach(action => {
+            // Ensure animations loop infinitely and never stop
+            action.setLoop(THREE.LoopRepeat, Infinity);
+            action.clampWhenFinished = false;
+            action.timeScale = 1;
+            action.setEffectiveWeight(1);
+            action.enabled = true;
+            
+            // Disable automatic deactivation
+            action.zeroSlopeAtEnd = false;
+            action.zeroSlopeAtStart = false;
+        });
+        
+        // Add model to scene and player
+        if (playerModel) {
+            // Scale and position adjustments
+            playerModel.scale.set(1, 1, 1);
+            
+            // Get player entity and attach model to player
+            const playerEntities = playerQuery(world);
+            if (playerEntities.length > 0) {
+                const pid = playerEntities[0];
+                const holder = world.ctx.maps.mesh.get(pid);
+                
+                if (holder) {
+                    // Position the model relative to the player's position
+                    // Fix: Adjust Y position to prevent sinking into ground
+                    playerModel.position.set(0, -0.9, 0);
+                    playerModel.rotation.y = Math.PI; // Face the camera by default
+                    
+                    // Add model to player holder
+                    holder.add(playerModel);
+                    
+                    // Log bone names for debugging/reference
+                    console.log("--------- BONE NAMES ---------");
+                    playerModel.traverse((object) => {
+                        if (object instanceof THREE.Bone) {
+                            console.log("Bone:", object.name);
+                        }
+                    });
+                    
+                    // Start with idle animation
+                    setAnimation("idle");
                 }
             }
         }
-
+    });
+    
+    // Simple animation switch without complex crossfading
+    function setAnimation(state: string) {
+        // Ignore if we're already in this state or animations not loaded
+        if (state === movementState || !animations.has(state === "walking" ? AnimationState.WALKING : AnimationState.IDLE)) {
+            return;
+        }
+        
+        // Update state
+        movementState = state;
+        console.log(`Changing animation to ${state}`);
+        
+        // Get the new animation
+        let newAction: THREE.AnimationAction | null = null;
+        
+        if (state === "walking") {
+            const walkAction = animations.get(AnimationState.WALKING);
+            if (walkAction) {
+                newAction = walkAction;
+            }
+        } else {
+            const idleAction = animations.get(AnimationState.IDLE);
+            if (idleAction) {
+                newAction = idleAction;
+            }
+        }
+        
+        // Only proceed if we have a valid action
+        if (!newAction) return;
+        
+        // Fade between animations - smoother transition
+        if (activeAction && activeAction !== newAction) {
+            // Prepare new action
+            newAction.reset();
+            newAction.setEffectiveWeight(1);
+            newAction.enabled = true;
+            newAction.play();
+            
+            // Fade from current to new
+            newAction.crossFadeFrom(activeAction, 0.2, true);
+        } else {
+            // First animation or direct switch
+            newAction.enabled = true;
+            newAction.reset();
+            newAction.play();
+        }
+        
+        // Update current animation state
+        activeAction = newAction;
+        currentAnimation = state === "walking" ? AnimationState.WALKING : AnimationState.IDLE;
+        
+        // Set timeout before next state change is allowed
+        movementTimer = 0.3; // 300ms debounce
+    }
+    
+    // Ensure an animation is playing (fallback to idle)
+    function ensureAnimationPlaying() {
+        if (!mixer || !animations.size) return;
+        
+        // Check if any action is currently running
+        let isAnimationActive = false;
+        
+        // Check if the active action is properly running
+        if (activeAction && activeAction.isRunning()) {
+            isAnimationActive = true;
+        }
+        
+        if (!isAnimationActive) {
+            console.log("No active animation detected, resetting to idle");
+            
+            // Force idle animation to play
+            const idleAction = animations.get(AnimationState.IDLE);
+            if (idleAction) {
+                // Stop all potentially paused actions
+                mixer.stopAllAction();
+                
+                // Reset action state
+                idleAction.reset();
+                idleAction.setEffectiveWeight(1);
+                idleAction.enabled = true;
+                idleAction.play();
+                
+                // Update current state
+                activeAction = idleAction;
+                currentAnimation = AnimationState.IDLE;
+                movementState = "idle";
+            }
+        }
+    }
+    
+    // Check if player is moving based on position buffer
+    function isPlayerMoving() {
+        // Count true values in buffer
+        const movingFrames = movementBuffer.filter(moving => moving).length;
+        // Consider moving if at least 3 of the last 5 frames showed movement
+        return movingFrames >= 3;
+    }
+    
+    return (w: ECS) => {
+        // Update timers
+        if (movementTimer > 0) {
+            movementTimer -= w.time.dt;
+        }
+        
+        // Increment animation check timer
+        animationCheckTimer += w.time.dt;
+        
+        // Only continue if animations are loaded
+        if (!mixer || !playerModel) {
+            return w;
+        }
+        
+        // Check animation state regularly to prevent T-pose
+        if (animationCheckTimer > 1.0) { // Check every second
+            ensureAnimationPlaying();
+            animationCheckTimer = 0;
+        }
+        
+        // Update animation mixer
+        mixer.update(w.time.dt);
+        
+        // Process both player and localPlayer entities
+        // In most cases, entities will have both components
+        const entities = new Set([...playerQuery(w), ...localPlayerQuery(w)]);
+        
+        for (const eid of entities) {
+            const holder = w.ctx.maps.mesh.get(eid);
+            
+            if (holder) {
+                // Initialize previous position if needed
+                if (!w.time.prevPlayerPos) {
+                    w.time.prevPlayerPos = new THREE.Vector3(holder.position.x, holder.position.y, holder.position.z);
+                    continue; // Skip this frame as we need two positions to compare
+                }
+                
+                // Calculate horizontal movement (ignore Y)
+                const deltaX = holder.position.x - w.time.prevPlayerPos.x;
+                const deltaZ = holder.position.z - w.time.prevPlayerPos.z;
+                const movementSq = deltaX * deltaX + deltaZ * deltaZ;
+                
+                // Store in moving buffer (true if moving, false if not)
+                movementBuffer[bufferIndex] = movementSq > 0.0005;
+                bufferIndex = (bufferIndex + 1) % movementBuffer.length;
+                
+                // Determine movement state
+                const isMoving = isPlayerMoving();
+                
+                // Only change animation if debounce timer is up
+                if (movementTimer <= 0) {
+                    if (isMoving && movementState !== "walking") {
+                        setAnimation("walking");
+                    } else if (!isMoving && movementState !== "idle") {
+                        setAnimation("idle");
+                    }
+                }
+                
+                // Store current position for next frame
+                w.time.prevPlayerPos.set(holder.position.x, holder.position.y, holder.position.z);
+            }
+        }
+        
         return w;
     };
 }
