@@ -68,16 +68,42 @@ export const MovementState = {
   FALLING: 2
 };
 
-// Animation state enum values (Example)
+// Animation state enum values
 export const PlayerAnimationState = {
+  // Basic states
   IDLE: 0,
   WALKING: 1,
   RUNNING: 2,
   JUMPING: 3,
   FALLING: 4,
-  SHOOTING: 5, // Added
-  AIMING: 6,   // Added
-  DEATH: 7     // Added
+  
+  // Combat states
+  SHOOTING: 5, 
+  AIMING: 6,   
+  RELOAD: 7,
+  
+  // Movement states
+  CROUCH_IDLE: 8,
+  CROUCH_WALK: 9,
+  CROUCH_RUN: 10,
+  SPRINT: 11,
+  
+  // Special states
+  DEATH: 12,
+  HIT_REACTION: 13,
+  INSPECT_WEAPON: 14
+};
+
+// Animation transition timing map (in seconds)
+export const AnimationTransitions = {
+  // Default transition time between states
+  DEFAULT: 0.2,
+  
+  // Specific state transitions that need custom timing
+  [PlayerAnimationState.IDLE + "_to_" + PlayerAnimationState.WALKING]: 0.3,
+  [PlayerAnimationState.RUNNING + "_to_" + PlayerAnimationState.IDLE]: 0.5,
+  [PlayerAnimationState.JUMPING + "_to_" + PlayerAnimationState.FALLING]: 0.1,
+  [PlayerAnimationState.AIMING + "_to_" + PlayerAnimationState.SHOOTING]: 0.05
 };
 
 // Network configuration

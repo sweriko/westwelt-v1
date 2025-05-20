@@ -4,23 +4,22 @@
 import { defineQuery } from 'bitecs';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import { Player, LocalPlayer, MeshRef, FPController } from '../../components';
+import { Player, LocalPlayer, MeshRef, FPController, AnimationState } from '../../components';
 import { ECS } from '../../world';
-import { MovementState } from '../../config';
-
-// Animation state constants
-const AnimationState = {
-    IDLE: 'idle',
-    WALKING: 'walking'
-};
+import { MovementState, PlayerAnimationState } from '../../config';
+import { AnimationStateMachine } from './animationStateMachine';
+import { PlayerSystemConfig } from './index';
 
 export function initPlayerAnimationSystem(world: ECS) {
-    // Query for either Player or LocalPlayer entities with required components
+    // Query for player entities
     const playerQuery = defineQuery([Player, MeshRef, FPController]);
     const localPlayerQuery = defineQuery([LocalPlayer, MeshRef, FPController]);
     
     // Animation variables
     let playerModel: THREE.Group | null = null;
+    let animationStateMachine: AnimationStateMachine | null = null;
+    
+    // Legacy animation system variables (for backward compatibility)
     let mixer: THREE.AnimationMixer | null = null;
     let animations: Map<string, THREE.AnimationAction> = new Map();
     let currentAnimation: string | null = null;
@@ -43,41 +42,14 @@ export function initPlayerAnimationSystem(world: ECS) {
         // Store the model for later use
         playerModel = gltf.scene;
         
-        // Set up animation mixer
-        mixer = new THREE.AnimationMixer(playerModel);
-        
-        // Process animations
-        gltf.animations.forEach((clip) => {
-            // Create actions for each animation clip
-            if (mixer) {
-                const action = mixer.clipAction(clip);
-                
-                // Store by name for easier access
-                if (clip.name.toLowerCase().includes('idle')) {
-                    animations.set(AnimationState.IDLE, action);
-                    console.log(`Animation loaded: ${clip.name} (IDLE)`);
-                } else if (clip.name.toLowerCase().includes('walk')) {
-                    animations.set(AnimationState.WALKING, action);
-                    console.log(`Animation loaded: ${clip.name} (WALKING)`);
-                } else {
-                    console.log(`Other animation loaded: ${clip.name}`);
-                }
-            }
-        });
-        
-        // Configure all animations
-        animations.forEach(action => {
-            // Ensure animations loop infinitely and never stop
-            action.setLoop(THREE.LoopRepeat, Infinity);
-            action.clampWhenFinished = false;
-            action.timeScale = 1;
-            action.setEffectiveWeight(1);
-            action.enabled = true;
-            
-            // Disable automatic deactivation
-            action.zeroSlopeAtEnd = false;
-            action.zeroSlopeAtStart = false;
-        });
+        // Process the model differently based on camera mode
+        if (PlayerSystemConfig.USE_FULLBODY_FPS) {
+            // Advanced animation state machine for full-body FPS
+            setupFullBodyFPS(gltf);
+        } else {
+            // Legacy animation system for traditional camera
+            setupLegacyAnimations(gltf);
+        }
         
         // Add model to scene and player
         if (playerModel) {
@@ -108,16 +80,82 @@ export function initPlayerAnimationSystem(world: ECS) {
                     });
                     
                     // Start with idle animation
-                    setAnimation("idle");
+                    if (PlayerSystemConfig.USE_FULLBODY_FPS) {
+                        if (animationStateMachine) {
+                            animationStateMachine.setState(PlayerAnimationState.IDLE);
+                        }
+                    } else {
+                        setAnimation("idle");
+                    }
                 }
             }
         }
     });
     
-    // Simple animation switch without complex crossfading
+    // Setup for full-body FPS animation system
+    function setupFullBodyFPS(gltf: any) {
+        if (!playerModel) return;
+        
+        // Create the animation state machine
+        animationStateMachine = new AnimationStateMachine(
+            playerModel,
+            gltf.animations,
+            true // Enable debug logging
+        );
+        
+        console.log("Full-body FPS animation system initialized");
+    }
+    
+    // Setup for legacy animation system
+    function setupLegacyAnimations(gltf: any) {
+        if (!playerModel) return;
+        
+        // Set up animation mixer
+        mixer = new THREE.AnimationMixer(playerModel);
+        
+        // Process animations
+        gltf.animations.forEach((clip: THREE.AnimationClip) => {
+            // Create actions for each animation clip
+            if (mixer) {
+                const action = mixer.clipAction(clip);
+                
+                // Store by name for easier access
+                if (clip.name.toLowerCase().includes('idle')) {
+                    animations.set('idle', action);
+                    console.log(`Animation loaded: ${clip.name} (IDLE)`);
+                } else if (clip.name.toLowerCase().includes('walk')) {
+                    animations.set('walking', action);
+                    console.log(`Animation loaded: ${clip.name} (WALKING)`);
+                } else {
+                    console.log(`Other animation loaded: ${clip.name}`);
+                }
+            }
+        });
+        
+        // Configure all animations
+        animations.forEach(action => {
+            // Ensure animations loop infinitely and never stop
+            action.setLoop(THREE.LoopRepeat, Infinity);
+            action.clampWhenFinished = false;
+            action.timeScale = 1;
+            action.setEffectiveWeight(1);
+            action.enabled = true;
+            
+            // Disable automatic deactivation
+            action.zeroSlopeAtEnd = false;
+            action.zeroSlopeAtStart = false;
+        });
+        
+        console.log("Legacy animation system initialized");
+    }
+    
+    // Simple animation switch without complex crossfading (legacy)
     function setAnimation(state: string) {
+        // Only used in legacy animation mode
+        if (PlayerSystemConfig.USE_FULLBODY_FPS) return;
+        
         // Ignore if we're already in this state or animations not loaded
-        if (state === movementState || !animations.has(state === "walking" ? AnimationState.WALKING : AnimationState.IDLE)) {
+        if (state === movementState || !animations.has(state === "walking" ? "walking" : "idle")) {
             return;
         }
         
@@ -129,12 +167,12 @@ export function initPlayerAnimationSystem(world: ECS) {
         let newAction: THREE.AnimationAction | null = null;
         
         if (state === "walking") {
-            const walkAction = animations.get(AnimationState.WALKING);
+            const walkAction = animations.get("walking");
             if (walkAction) {
                 newAction = walkAction;
             }
         } else {
-            const idleAction = animations.get(AnimationState.IDLE);
+            const idleAction = animations.get("idle");
             if (idleAction) {
                 newAction = idleAction;
             }
@@ -162,14 +200,17 @@ export function initPlayerAnimationSystem(world: ECS) {
         
         // Update current animation state
         activeAction = newAction;
-        currentAnimation = state === "walking" ? AnimationState.WALKING : AnimationState.IDLE;
+        currentAnimation = state === "walking" ? "walking" : "idle";
         
         // Set timeout before next state change is allowed
         movementTimer = 0.3; // 300ms debounce
     }
     
-    // Ensure an animation is playing (fallback to idle)
+    // Ensure an animation is playing (fallback to idle) - legacy
     function ensureAnimationPlaying() {
+        // Only used in legacy animation mode
+        if (PlayerSystemConfig.USE_FULLBODY_FPS) return;
+        
         if (!mixer || !animations.size) return;
         
         // Check if any action is currently running
@@ -184,7 +225,7 @@ export function initPlayerAnimationSystem(world: ECS) {
             console.log("No active animation detected, resetting to idle");
             
             // Force idle animation to play
-            const idleAction = animations.get(AnimationState.IDLE);
+            const idleAction = animations.get("idle");
             if (idleAction) {
                 // Stop all potentially paused actions
                 mixer.stopAllAction();
@@ -197,7 +238,7 @@ export function initPlayerAnimationSystem(world: ECS) {
                 
                 // Update current state
                 activeAction = idleAction;
-                currentAnimation = AnimationState.IDLE;
+                currentAnimation = "idle";
                 movementState = "idle";
             }
         }
@@ -211,6 +252,50 @@ export function initPlayerAnimationSystem(world: ECS) {
         return movingFrames >= 3;
     }
     
+    // Update animation state based on entity state
+    function updateAnimationState(eid: number, isMoving: boolean, isSprinting: boolean) {
+        // Use the appropriate animation system based on config
+        if (PlayerSystemConfig.USE_FULLBODY_FPS) {
+            if (!animationStateMachine) return;
+            
+            // Determine the appropriate animation state
+            let targetState = PlayerAnimationState.IDLE;
+            
+            // Get the move state (grounded, jumping, falling)
+            const moveState = FPController.moveState[eid];
+            
+            if (moveState === MovementState.JUMPING) {
+                targetState = PlayerAnimationState.JUMPING;
+            } else if (moveState === MovementState.FALLING) {
+                targetState = PlayerAnimationState.FALLING;
+            } else {
+                // Player is grounded
+                if (isMoving) {
+                    targetState = isSprinting ? 
+                        PlayerAnimationState.RUNNING : 
+                        PlayerAnimationState.WALKING;
+                } else {
+                    targetState = PlayerAnimationState.IDLE;
+                }
+            }
+            
+            // Apply the state change
+            animationStateMachine.setState(targetState);
+            
+            // Update the Animation component with the current state
+            AnimationState.state[eid] = targetState;
+        } else {
+            // Legacy animation system
+            if (movementTimer <= 0) {
+                if (isMoving && movementState !== "walking") {
+                    setAnimation("walking");
+                } else if (!isMoving && movementState !== "idle") {
+                    setAnimation("idle");
+                }
+            }
+        }
+    }
+    
     return (w: ECS) => {
         // Update timers
         if (movementTimer > 0) {
@@ -220,19 +305,27 @@ export function initPlayerAnimationSystem(world: ECS) {
         // Increment animation check timer
         animationCheckTimer += w.time.dt;
         
-        // Only continue if animations are loaded
-        if (!mixer || !playerModel) {
-            return w;
+        // Update based on animation mode
+        if (PlayerSystemConfig.USE_FULLBODY_FPS) {
+            // Full-body FPS animation updates
+            if (animationStateMachine) {
+                animationStateMachine.update(w.time.dt);
+            }
+        } else {
+            // Legacy animation checks and updates
+            if (mixer && playerModel) {
+                // Check animation state regularly to prevent T-pose
+                if (animationCheckTimer > 1.0) { // Check every second
+                    ensureAnimationPlaying();
+                    animationCheckTimer = 0;
+                }
+                
+                // Update animation mixer
+                mixer.update(w.time.dt);
+            } else {
+                return w; // Skip rest of function if no animations
+            }
         }
-        
-        // Check animation state regularly to prevent T-pose
-        if (animationCheckTimer > 1.0) { // Check every second
-            ensureAnimationPlaying();
-            animationCheckTimer = 0;
-        }
-        
-        // Update animation mixer
-        mixer.update(w.time.dt);
         
         // Process both player and localPlayer entities
         // In most cases, entities will have both components
@@ -259,15 +352,10 @@ export function initPlayerAnimationSystem(world: ECS) {
                 
                 // Determine movement state
                 const isMoving = isPlayerMoving();
+                const isSprinting = w.input?.sprint || false;
                 
-                // Only change animation if debounce timer is up
-                if (movementTimer <= 0) {
-                    if (isMoving && movementState !== "walking") {
-                        setAnimation("walking");
-                    } else if (!isMoving && movementState !== "idle") {
-                        setAnimation("idle");
-                    }
-                }
+                // Update animation state
+                updateAnimationState(eid, isMoving, isSprinting);
                 
                 // Store current position for next frame
                 w.time.prevPlayerPos.set(holder.position.x, holder.position.y, holder.position.z);

@@ -12,6 +12,18 @@ import { initPlayerMovementSystem } from './movementSystem';
 import { initPlayerLookSystem } from './lookSystem';
 import { initPlayerShootSystem } from './shootSystem';
 import { initPlayerAnimationSystem } from './animationSystem';
+import { initFPSBodySystem } from './fpsBodySystem.js';
+import { createControlPanel } from './controlPanel.js';
+
+// Configuration for the player system
+export const PlayerSystemConfig = {
+  // Flag to enable the full-body FPS camera
+  // When false, uses the traditional separate camera/model approach
+  USE_FULLBODY_FPS: true,
+  
+  // Control panel configuration
+  SHOW_CONTROL_PANEL: true
+};
 
 export function initPlayerSystem(world: ECS) {
   const { rapier, physics, three, maps } = world.ctx;
@@ -50,11 +62,21 @@ export function initPlayerSystem(world: ECS) {
   three.scene.add(holder);
   maps.mesh.set(pid, holder);
 
-  // Position the camera in the holder
-  const cameraOffset = new THREE.Object3D();
-  cameraOffset.position.set(0, 1.6, 0); // Eye height of ~1.6m
-  holder.add(cameraOffset);
-  cameraOffset.add(three.camera);
+  // Set up camera - different setup depending on camera mode
+  if (!PlayerSystemConfig.USE_FULLBODY_FPS) {
+    // Traditional setup: camera directly parented to holder
+    const cameraOffset = new THREE.Object3D();
+    cameraOffset.position.set(0, 1.6, 0); // Eye height of ~1.6m
+    holder.add(cameraOffset);
+    cameraOffset.add(three.camera);
+  } else {
+    // For full-body FPS, just add a temporary reference
+    // The actual camera setup happens in the FPS body system
+    const tempCameraHolder = new THREE.Object3D();
+    tempCameraHolder.position.set(0, 1.6, 0);
+    holder.add(tempCameraHolder);
+    tempCameraHolder.add(three.camera);
+  }
 
   // Initialize Quaternion in Transform component
   const quaternion = new THREE.Quaternion();
@@ -100,6 +122,15 @@ export function initPlayerSystem(world: ECS) {
   const lookSystem = initPlayerLookSystem(world);
   const shootSystem = initPlayerShootSystem(world);
   const animationSystem = initPlayerAnimationSystem(world);
+  
+  // Initialize FPS body system if enabled
+  const fpsBodySystem = PlayerSystemConfig.USE_FULLBODY_FPS ? 
+    initFPSBodySystem(world) : null;
+  
+  // Create control panel for camera settings if enabled
+  if (PlayerSystemConfig.SHOW_CONTROL_PANEL) {
+    createControlPanel();
+  }
 
   /* Combined system ------------------------------------------------- */
   return (w: ECS) => {
@@ -108,11 +139,17 @@ export function initPlayerSystem(world: ECS) {
     // 2. Movement system (uses rotation for movement direction)
     // 3. Shoot system (uses camera direction)
     // 4. Animation system (based on movement state)
+    // 5. FPS body system (if enabled, updates camera position/rotation)
     
     lookSystem(w);     // Handle camera rotation first
     movementSystem(w); // Apply movement based on new rotation
     shootSystem(w);    // Handle shooting based on camera direction
-    animationSystem(w);
+    animationSystem(w); // Update animations
+    
+    // Apply FPS body system if enabled
+    if (PlayerSystemConfig.USE_FULLBODY_FPS && fpsBodySystem) {
+      fpsBodySystem(w);
+    }
     
     return w;
   };
