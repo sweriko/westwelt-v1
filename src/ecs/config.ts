@@ -58,7 +58,40 @@ export const SceneConfig = {
   CUBE_RESTITUTION: 0.4,
   CUBE_FRICTION: 0.5,
   AMBIENT_LIGHT_INTENSITY: 0.8,
-  DIRECTIONAL_LIGHT_INTENSITY: 1.0
+  DIRECTIONAL_LIGHT_INTENSITY: 1.0,
+  
+  // Terrain configuration
+  TERRAIN: {
+    WIDTH: 500,
+    HEIGHT: 80,
+    DEPTH: 500,
+    SEGMENTS_X: 256,
+    SEGMENTS_Z: 256,
+    HEIGHT_SCALE: 80,
+    
+    // Material heights (normalized 0-1)
+    SNOW_HEIGHT: 0.8,
+    ROCK_HEIGHT: 0.6, 
+    GRASS_HEIGHT: 0.3,
+    SAND_HEIGHT: 0.1,
+    
+    // Texture settings
+    TEXTURE_SCALE: 0.05,
+    DETAIL_SCALE: 0.2,
+    NORMAL_SCALE: 1.0,
+    
+    // Rendering features
+    ENABLE_TRIPLANAR: true,
+    ENABLE_TEXTURE_BOMBING: true,
+    
+    // Physics settings
+    COLLISION: {
+      ENABLE_FALLBACK_GROUND: true,
+      FRICTION: 1.0,
+      RESTITUTION: 0.1,
+      MAX_COLLISION_SEGMENTS: 128 // Increased from 64 for higher resolution collision
+    }
+  }
 };
 
 // Movement state enum values

@@ -10,6 +10,7 @@ import { initTimeStepSystem }  from './systems/timeStep';
 import { initGrassSystem }     from './systems/grass';
 import { initNetworkSystem, NetworkState } from './systems/network/client'; // Import network system
 import { initHealthSystem } from './systems/healthSystem'; // Import health system
+import { createTerrainSystem } from './systems/terrain/TerrainSystem'; // Import terrain system
 import * as THREE from 'three';
 import type * as RAPIER from '@dimforge/rapier3d-compat';
 
@@ -47,6 +48,7 @@ export function createECS(ctx: ECSContext) {
     initProjectileSystem(world),// Manages visual lifetime of local/remote projectiles
     initHealthSystem(world),    // Handles health updates and death/respawn events
     initGrassSystem(world),
+    createTerrainSystem(ctx),   // Add terrain system
     initDebugVisSystem(world),
     initRenderSyncSystem(world) // Render sync runs last
   );

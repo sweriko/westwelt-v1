@@ -111,7 +111,7 @@ export function initFPSBodySystem(world: ECS) {
       // Fix for clipping plane issues - adjust near and far planes
       if (w.ctx.three.camera instanceof THREE.PerspectiveCamera) {
         w.ctx.three.camera.near = 0.1;
-        w.ctx.three.camera.far = 10000;
+        w.ctx.three.camera.far = 50000;
         w.ctx.three.camera.updateProjectionMatrix();
       }
       

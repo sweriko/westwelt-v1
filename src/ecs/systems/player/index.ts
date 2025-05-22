@@ -58,7 +58,7 @@ export function initPlayerSystem(world: ECS) {
 
   // Create mesh holder
   const holder = new THREE.Object3D();
-  holder.position.set(0, 3, 6);
+  holder.position.set(0, 100, 6); // Lower the player spawn height
   three.scene.add(holder);
   maps.mesh.set(pid, holder);
 

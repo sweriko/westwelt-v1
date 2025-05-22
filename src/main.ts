@@ -19,6 +19,10 @@ async function main() {
   const { world, pipeline } = createECS(ctx);
   console.log("ECS created.");
 
+  // Give the physics engine time to fully initialize
+  console.log("Waiting for physics engine to stabilize...");
+  await new Promise(resolve => setTimeout(resolve, 500));
+
   console.log("Populating scene...");
   populateScene(world, ctx);
   console.log("Scene populated.");

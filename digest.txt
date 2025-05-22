@@ -1,6 +1,5 @@
 <goal>
-I want you to fix all the issues.
-The following is the current codebase
+ 
 </goal>
 
 <output_requirements>
@@ -37,7 +36,10 @@ Directory structure:
     │   │   │   │   └── client.ts
     │   │   │   ├── physics.ts
     │   │   │   ├── player/
+    │   │   │   │   ├── animationStateMachine.ts
     │   │   │   │   ├── animationSystem.ts
+    │   │   │   │   ├── controlPanel.ts
+    │   │   │   │   ├── fpsBodySystem.ts
     │   │   │   │   ├── index.ts
     │   │   │   │   ├── lookSystem.ts
     │   │   │   │   ├── movementSystem.ts
@@ -51,7 +53,8 @@ Directory structure:
     │   │   │   └── mathUtils.ts
     │   │   └── world.ts
     │   ├── gameloop.ts
-    │   └── main.ts
+    │   ├── main.ts
+    │   └── types/
     ├── tsconfig.json
     └── vite.config.ts
 
@@ -470,7 +473,7 @@ export const FPController = defineComponent({
   moveState: Types.ui8,    // 0=Grounded, 1=Jumping, 2=Falling
   lastGrounded: Types.f32, // Time when last grounded
   lastJump: Types.f32,     // Time when last jumped
-  // lastShot removed, handled by network/server now
+  lastShot: Types.f32,     // Time when last shot
   jumpRequested: Types.ui8,// Jump buffer flag
   lastJumpRequest: Types.f32 // Time when jump was requested
 });
@@ -497,6 +500,7 @@ export const MeshRef      = defineComponent({ id: Types.ui32 });
 
 /** Tags */
 // Player tag is now split into LocalPlayer and RemotePlayer
+export const Player = defineComponent();
 export const Projectile = defineComponent();
 export const CubeTag    = defineComponent();
 
@@ -556,7 +560,8 @@ export const PlayerConfig = {
 };
 
 export const WeaponConfig = {
-  // SHOOT_CD_MS removed - server now controls this
+  // Add this back for the player system
+  SHOOT_CD_MS: 200, 
   BULLET_SPEED: 40,
   BULLET_TTL_MS: 5000, // Used for visual effect lifetime
   BULLET_SPAWN_DISTANCE: 1.5,
@@ -599,16 +604,42 @@ export const MovementState = {
   FALLING: 2
 };
 
-// Animation state enum values (Example)
+// Animation state enum values
 export const PlayerAnimationState = {
+  // Basic states
   IDLE: 0,
   WALKING: 1,
   RUNNING: 2,
   JUMPING: 3,
   FALLING: 4,
-  SHOOTING: 5, // Added
-  AIMING: 6,   // Added
-  DEATH: 7     // Added
+  
+  // Combat states
+  SHOOTING: 5, 
+  AIMING: 6,   
+  RELOAD: 7,
+  
+  // Movement states
+  CROUCH_IDLE: 8,
+  CROUCH_WALK: 9,
+  CROUCH_RUN: 10,
+  SPRINT: 11,
+  
+  // Special states
+  DEATH: 12,
+  HIT_REACTION: 13,
+  INSPECT_WEAPON: 14
+};
+
+// Animation transition timing map (in seconds)
+export const AnimationTransitions = {
+  // Default transition time between states
+  DEFAULT: 0.2,
+  
+  // Specific state transitions that need custom timing
+  [PlayerAnimationState.IDLE + "_to_" + PlayerAnimationState.WALKING]: 0.3,
+  [PlayerAnimationState.RUNNING + "_to_" + PlayerAnimationState.IDLE]: 0.5,
+  [PlayerAnimationState.JUMPING + "_to_" + PlayerAnimationState.FALLING]: 0.1,
+  [PlayerAnimationState.AIMING + "_to_" + PlayerAnimationState.SHOOTING]: 0.05
 };
 
 // Network configuration
@@ -2494,7 +2525,7 @@ export function initNetworkSystem(world: ECS) {
                     position: { x: Transform.x[eid], y: Transform.y[eid], z: Transform.z[eid] },
                     rotation: { x: Transform.qx[eid], y: Transform.qy[eid], z: Transform.qz[eid], w: Transform.qw[eid] },
                     animationState: AnimationState.state[eid],
-                    health: Health.current[eid], // Include health
+                    health: Health.current[eid]
                 };
 
                 network.send({ type: 'playerUpdate', state: currentState });
@@ -2504,9 +2535,11 @@ export function initNetworkSystem(world: ECS) {
 
         // --- Interpolate Remote Players ---
         const remoteEntities = remotePlayerQuery(w);
-        const renderTime = now - NetworkConfig.INTERPOLATION_DELAY_MS; // Target time for rendering
+        // Use a fixed delay for interpolation between server updates
+        const renderTime = now - NetworkConfig.INTERPOLATION_DELAY_MS;
 
         for (const eid of remoteEntities) {
+            // Get the target state from InterpolationTarget component
             const currentTimestamp = InterpolationTarget.timestamp[eid];
             const targetX = InterpolationTarget.targetX[eid];
             const targetY = InterpolationTarget.targetY[eid];
@@ -2516,9 +2549,10 @@ export function initNetworkSystem(world: ECS) {
             const targetQZ = InterpolationTarget.targetQZ[eid];
             const targetQW = InterpolationTarget.targetQW[eid];
 
-            // Very simple interpolation: Move halfway towards the target each frame
-            const lerpFactor = 0.2; // Adjust this for smoothness
+            // Smooth interpolation factor - adjust this based on network conditions
+            const lerpFactor = 0.1; // Reduced from 0.2 for smoother movement
 
+            // Update position with interpolation
             Transform.x[eid] += (targetX - Transform.x[eid]) * lerpFactor;
             Transform.y[eid] += (targetY - Transform.y[eid]) * lerpFactor;
             Transform.z[eid] += (targetZ - Transform.z[eid]) * lerpFactor;
@@ -2526,12 +2560,18 @@ export function initNetworkSystem(world: ECS) {
             // Use Quaternion slerp for smoother rotation interpolation
             const currentQuat = new THREE.Quaternion(Transform.qx[eid], Transform.qy[eid], Transform.qz[eid], Transform.qw[eid]);
             const targetQuat = new THREE.Quaternion(targetQX, targetQY, targetQZ, targetQW);
-            currentQuat.slerp(targetQuat, lerpFactor);
+            
+            // Use a smaller factor for rotation to avoid jittering
+            const rotLerpFactor = 0.08; // Slower rotation interpolation
+            currentQuat.slerp(targetQuat, rotLerpFactor);
 
             Transform.qx[eid] = currentQuat.x;
             Transform.qy[eid] = currentQuat.y;
             Transform.qz[eid] = currentQuat.z;
             Transform.qw[eid] = currentQuat.w;
+            
+            // Optional: Update the mesh directly here if needed
+            // But generally this should be handled by renderSync
         }
 
         // --- Handle Player Model Loading for New Remote Players ---
@@ -2813,317 +2853,1347 @@ export function initPhysicsSystem(_world: ECS) {
 
 
 ================================================
+File: /src/ecs/systems/player/animationStateMachine.ts
+================================================
+/**
+ * Animation state machine for the FPS full-body camera setup
+ */
+import * as THREE from 'three';
+import { PlayerAnimationState, AnimationTransitions } from '../../config';
+
+// Define animation clip meta data structure
+interface AnimationClipMeta {
+  name: string;          // Original name from the GLTF file
+  state: number;         // Mapped state (PlayerAnimationState enum value)
+  weight: number;        // Current weight (0-1)
+  action: THREE.AnimationAction | null; // Reference to the THREE animation action
+  loop: THREE.AnimationActionLoopStyles; // Loop type (THREE.LoopOnce, THREE.LoopRepeat, etc.)
+  clampWhenFinished: boolean; // Whether to clamp the last frame when animation finishes
+  timeScale: number;     // Animation playback speed
+  isTransitioning: boolean; // Whether this animation is currently in a transition
+}
+
+export class AnimationStateMachine {
+  // Animation mixer
+  private mixer: THREE.AnimationMixer;
+  
+  // Animation data
+  private clips: Map<number, AnimationClipMeta> = new Map();
+  private activeState: number = PlayerAnimationState.IDLE;
+  private previousState: number = PlayerAnimationState.IDLE;
+  
+  // Transition info
+  private inTransition: boolean = false;
+  private transitionTimer: number = 0;
+  private transitionDuration: number = 0;
+  
+  // Debug
+  private debug: boolean;
+  
+  /**
+   * Create a new animation state machine
+   * @param model The model to animate
+   * @param animationClips Array of animation clips from the GLTF file
+   * @param debug Whether to log debug info
+   */
+  constructor(model: THREE.Group, animationClips: THREE.AnimationClip[], debug: boolean = false) {
+    this.mixer = new THREE.AnimationMixer(model);
+    this.debug = debug;
+    
+    // Map animation clips to state enum values based on name pattern matching
+    this.mapAnimationClips(animationClips);
+    
+    // Set initial state
+    this.setState(PlayerAnimationState.IDLE);
+    
+    if (this.debug) {
+      console.log(`Animation State Machine initialized with ${this.clips.size} clips`);
+    }
+  }
+  
+  /**
+   * Map animation clips to state enum values by name pattern matching
+   */
+  private mapAnimationClips(animationClips: THREE.AnimationClip[]): void {
+    // Map of keywords to animation states
+    const keywordMap: Record<string, number> = {
+      'idle': PlayerAnimationState.IDLE,
+      'stand': PlayerAnimationState.IDLE,
+      'walk': PlayerAnimationState.WALKING,
+      'run': PlayerAnimationState.RUNNING,
+      'sprint': PlayerAnimationState.SPRINT,
+      'jump': PlayerAnimationState.JUMPING,
+      'fall': PlayerAnimationState.FALLING,
+      'shoot': PlayerAnimationState.SHOOTING,
+      'fire': PlayerAnimationState.SHOOTING,
+      'aim': PlayerAnimationState.AIMING,
+      'reload': PlayerAnimationState.RELOAD,
+      'crouch_idle': PlayerAnimationState.CROUCH_IDLE,
+      'crouchidle': PlayerAnimationState.CROUCH_IDLE,
+      'crouch_walk': PlayerAnimationState.CROUCH_WALK,
+      'crouchwalk': PlayerAnimationState.CROUCH_WALK,
+      'death': PlayerAnimationState.DEATH,
+      'die': PlayerAnimationState.DEATH,
+      'hit': PlayerAnimationState.HIT_REACTION,
+      'inspect': PlayerAnimationState.INSPECT_WEAPON
+    };
+    
+    // Process each animation clip
+    for (const clip of animationClips) {
+      // Convert clip name to lowercase for matching
+      const lowerName = clip.name.toLowerCase();
+      
+      // Try to match keywords to determine state
+      let state = -1;
+      let highestPriorityMatch = -1;
+      
+      // Check for each keyword
+      for (const [keyword, stateValue] of Object.entries(keywordMap)) {
+        if (lowerName.includes(keyword)) {
+          // If we find a match and it's higher priority (or first match), store it
+          if (stateValue > highestPriorityMatch) {
+            state = stateValue;
+            highestPriorityMatch = stateValue;
+          }
+        }
+      }
+      
+      // If no state was found, skip this clip
+      if (state === -1) {
+        if (this.debug) {
+          console.log(`Could not map animation: ${clip.name}`);
+        }
+        continue;
+      }
+      
+      // Create animation action from clip
+      const action = this.mixer.clipAction(clip);
+      
+      // Configure default action settings
+      action.setEffectiveWeight(0); // Start with zero weight
+      action.enabled = true;
+      
+      // Determine if animation should loop based on state
+      const shouldLoop = [
+        PlayerAnimationState.DEATH,
+        PlayerAnimationState.SHOOTING,
+        PlayerAnimationState.RELOAD,
+        PlayerAnimationState.HIT_REACTION,
+        PlayerAnimationState.INSPECT_WEAPON
+      ].includes(state) ? false : true;
+      
+      // Create clip metadata
+      const clipMeta: AnimationClipMeta = {
+        name: clip.name,
+        state: state,
+        weight: 0,
+        action: action,
+        loop: shouldLoop ? THREE.LoopRepeat : THREE.LoopOnce,
+        clampWhenFinished: !shouldLoop,
+        timeScale: 1.0,
+        isTransitioning: false
+      };
+      
+      // Configure action based on metadata
+      action.setLoop(clipMeta.loop, Infinity);
+      action.clampWhenFinished = clipMeta.clampWhenFinished;
+      
+      // Store in map
+      this.clips.set(state, clipMeta);
+      
+      if (this.debug) {
+        console.log(`Mapped animation: ${clip.name} -> ${this.getStateName(state)}`);
+      }
+    }
+    
+    // For any missing essential animations, create default placeholders
+    this.createPlaceholderIfMissing(PlayerAnimationState.IDLE);
+    this.createPlaceholderIfMissing(PlayerAnimationState.WALKING);
+  }
+  
+  /**
+   * Create a placeholder animation if a critical state is missing
+   */
+  private createPlaceholderIfMissing(state: number): void {
+    if (!this.clips.has(state)) {
+      if (this.debug) {
+        console.warn(`Critical animation state missing: ${this.getStateName(state)}, creating placeholder`);
+      }
+      
+      // Create a dummy clip
+      const dummyClip = new THREE.AnimationClip(
+        `placeholder_${this.getStateName(state)}`, 
+        1, 
+        [] // Empty tracks
+      );
+      
+      // Create action from clip
+      const action = this.mixer.clipAction(dummyClip);
+      
+      // Create clip metadata
+      const clipMeta: AnimationClipMeta = {
+        name: dummyClip.name,
+        state: state,
+        weight: 0,
+        action: action,
+        loop: THREE.LoopRepeat,
+        clampWhenFinished: false,
+        timeScale: 1.0,
+        isTransitioning: false
+      };
+      
+      // Configure action
+      action.setLoop(clipMeta.loop, Infinity);
+      action.clampWhenFinished = clipMeta.clampWhenFinished;
+      
+      // Store in map
+      this.clips.set(state, clipMeta);
+    }
+  }
+  
+  /**
+   * Get user-friendly name for an animation state
+   */
+  private getStateName(state: number): string {
+    for (const [key, value] of Object.entries(PlayerAnimationState)) {
+      if (typeof value === 'number' && value === state) {
+        return key;
+      }
+    }
+    return `Unknown(${state})`;
+  }
+  
+  /**
+   * Set the current animation state
+   * @param state The new state to set
+   * @param forceInstant If true, will switch immediately without transition
+   * @returns True if state changed, false if same state or invalid state
+   */
+  setState(state: number, forceInstant: boolean = false): boolean {
+    // If same state, do nothing
+    if (state === this.activeState) {
+      return false;
+    }
+    
+    // Check if the state exists
+    if (!this.clips.has(state)) {
+      console.warn(`Animation state not available: ${this.getStateName(state)}`);
+      
+      // Try to use closest available state
+      if (state === PlayerAnimationState.FALLING && this.clips.has(PlayerAnimationState.JUMPING)) {
+        state = PlayerAnimationState.JUMPING;
+      } else if (state === PlayerAnimationState.RUNNING && this.clips.has(PlayerAnimationState.WALKING)) {
+        state = PlayerAnimationState.WALKING;
+      } else if (state === PlayerAnimationState.JUMPING && this.clips.has(PlayerAnimationState.IDLE)) {
+        state = PlayerAnimationState.IDLE;
+      } else if (!this.clips.has(PlayerAnimationState.IDLE)) {
+        // If we can't even fall back to IDLE, just return
+        return false;
+      } else {
+        // Default fallback to IDLE
+        state = PlayerAnimationState.IDLE;
+      }
+    }
+    
+    // Store previous state for reference
+    this.previousState = this.activeState;
+    
+    // Get animations
+    const prevAnim = this.clips.get(this.previousState);
+    const nextAnim = this.clips.get(state);
+    
+    if (!prevAnim || !nextAnim || !prevAnim.action || !nextAnim.action) {
+      console.error(`Invalid animation data for transition from ${this.getStateName(this.previousState)} to ${this.getStateName(state)}`);
+      return false;
+    }
+    
+    // Calculate transition time
+    let transitionTime = AnimationTransitions.DEFAULT;
+    const specificTransitionKey = `${this.previousState}_to_${state}`;
+    if (specificTransitionKey in AnimationTransitions) {
+      transitionTime = AnimationTransitions[specificTransitionKey as keyof typeof AnimationTransitions];
+    }
+    
+    if (forceInstant) {
+      transitionTime = 0;
+    }
+    
+    // Set new active state
+    this.activeState = state;
+    
+    // Handle transition
+    if (transitionTime <= 0) {
+      // Immediate switch
+      prevAnim.action.stop();
+      nextAnim.action.play();
+      prevAnim.weight = 0;
+      nextAnim.weight = 1;
+      this.inTransition = false;
+    } else {
+      // Start crossfade transition
+      prevAnim.action.fadeOut(transitionTime);
+      nextAnim.action.reset().fadeIn(transitionTime).play();
+      
+      this.inTransition = true;
+      this.transitionTimer = 0;
+      this.transitionDuration = transitionTime;
+      
+      if (this.debug) {
+        console.log(`Starting transition: ${this.getStateName(this.previousState)} -> ${this.getStateName(this.activeState)} (${transitionTime}s)`);
+      }
+    }
+    
+    return true;
+  }
+  
+  /**
+   * Update the animation state machine
+   * @param deltaTime Time elapsed since last update in seconds
+   */
+  update(deltaTime: number): void {
+    // Update the animation mixer
+    this.mixer.update(deltaTime);
+    
+    // Update transition state if needed
+    if (this.inTransition) {
+      this.transitionTimer += deltaTime;
+      
+      // Calculate progress (0-1)
+      const t = Math.min(1.0, this.transitionTimer / this.transitionDuration);
+      
+      // Get source and target animations
+      const prevClip = this.clips.get(this.previousState);
+      const nextClip = this.clips.get(this.activeState);
+      
+      if (prevClip && nextClip && prevClip.action && nextClip.action) {
+        // Update weights based on progress
+        prevClip.weight = 1.0 - t;
+        nextClip.weight = t;
+        
+        // Apply weights to actions
+        prevClip.action.setEffectiveWeight(prevClip.weight);
+        nextClip.action.setEffectiveWeight(nextClip.weight);
+        
+        // Check if transition is complete
+        if (t >= 1.0) {
+          // Stop the previous animation
+          prevClip.action.stop();
+          prevClip.weight = 0;
+          prevClip.isTransitioning = false;
+          
+          // Ensure the new animation has full weight
+          nextClip.action.setEffectiveWeight(1);
+          nextClip.weight = 1;
+          nextClip.isTransitioning = false;
+          
+          // Transition complete
+          this.inTransition = false;
+          this.transitionTimer = 0;
+          
+          if (this.debug) {
+            console.log(`Transition complete: ${this.getStateName(this.previousState)} -> ${this.getStateName(this.activeState)}`);
+          }
+        }
+      }
+    }
+    
+    // Check for animations that have ended (one-shot animations)
+    const currentClip = this.clips.get(this.activeState);
+    if (currentClip && currentClip.action && 
+        currentClip.loop === THREE.LoopOnce && 
+        !this.inTransition &&
+        currentClip.action.loop === THREE.LoopOnce &&
+        currentClip.action.time >= currentClip.action.getClip().duration) {
+      
+      // Animation has completed, transition to idle
+      if (this.debug) {
+        console.log(`One-shot animation completed: ${this.getStateName(this.activeState)}, returning to IDLE`);
+      }
+      
+      this.setState(PlayerAnimationState.IDLE);
+    }
+  }
+  
+  /**
+   * Get the current animation state
+   */
+  getState(): number {
+    return this.activeState;
+  }
+  
+  /**
+   * Get the previous animation state
+   */
+  getPreviousState(): number {
+    return this.previousState;
+  }
+  
+  /**
+   * Check if currently in transition between states
+   */
+  isInTransition(): boolean {
+    return this.inTransition;
+  }
+  
+  /**
+   * Set the time scale for an animation
+   * @param state The animation state to adjust
+   * @param timeScale The new time scale (1.0 = normal speed)
+   */
+  setTimeScale(state: number, timeScale: number): void {
+    const clipMeta = this.clips.get(state);
+    if (clipMeta && clipMeta.action) {
+      clipMeta.timeScale = timeScale;
+      clipMeta.action.setEffectiveTimeScale(timeScale);
+    }
+  }
+  
+  /**
+   * Set the time scale for the current animation
+   * @param timeScale The new time scale (1.0 = normal speed)
+   */
+  setCurrentTimeScale(timeScale: number): void {
+    this.setTimeScale(this.activeState, timeScale);
+  }
+  
+  /**
+   * Get the animation mixer
+   */
+  getMixer(): THREE.AnimationMixer {
+    return this.mixer;
+  }
+} 
+
+================================================
 File: /src/ecs/systems/player/animationSystem.ts
 ================================================
-import { defineQuery, hasComponent } from 'bitecs';
+/**
+ * Player animation system - handles player model loading, animation states and transitions
+ */
+import { defineQuery } from 'bitecs';
 import * as THREE from 'three';
-import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader';
-import {
-    LocalPlayer, RemotePlayer, MeshRef, FPController, Transform, AnimationState, NetworkId
-} from '../../components';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { Player, LocalPlayer, MeshRef, FPController, AnimationState } from '../../components';
 import { ECS } from '../../world';
 import { MovementState, PlayerAnimationState } from '../../config';
-
-// Store animations globally for reuse
-let baseModelLoaded = false;
-let baseModelAnimations: THREE.AnimationClip[] = [];
-
-// Store player animation data per entity
-const playerAnimationData = new Map<number, {
-    mixer: THREE.AnimationMixer | null;
-    actions: Record<string, THREE.AnimationAction>;
-    currentAction: THREE.AnimationAction | null;
-    model: THREE.Object3D | null;
-}>();
-
-// Try to harmonize animation names across different models
-function getStandardizedAnimationName(clipName: string): string {
-    const name = clipName.toLowerCase();
-    if (name.includes('idle')) return 'idle';
-    if (name.includes('walk')) return 'walk';
-    if (name.includes('run')) return 'run';
-    if (name.includes('jump')) {
-        if (name.includes('start')) return 'jump_start';
-        if (name.includes('fall')) return 'jump_fall';
-        return 'jump';
-    }
-    if (name.includes('shoot')) return 'shoot';
-    if (name.includes('death')) return 'death';
-    // Default to original name if no match
-    return clipName;
-}
-
-// Preload the player model for better load times
-async function preloadBaseModel() {
-    if (baseModelLoaded) return;
-    console.log("Preloading base player model for animations...");
-    const loader = new GLTFLoader();
-    try {
-        const gltf = await loader.loadAsync('/models/playermodel.glb');
-        baseModelAnimations = gltf.animations;
-        baseModelLoaded = true;
-        
-        // Log available animations for debugging
-        console.log("Base animations loaded:");
-        gltf.animations.forEach(clip => {
-            console.log(`- Animation: ${clip.name} (${getStandardizedAnimationName(clip.name)})`);
-        });
-    } catch (error) {
-        console.error("Failed to preload base player model animations:", error);
-    }
-}
-preloadBaseModel();
+import { AnimationStateMachine } from './animationStateMachine';
+import { PlayerSystemConfig } from './index';
 
 export function initPlayerAnimationSystem(world: ECS) {
-    // Query for all players that need animations (both local and remote)
-    const playerQuery = defineQuery([MeshRef, Transform, AnimationState]);
-    const localPlayerQuery = defineQuery([LocalPlayer, FPController]);
-
-    // --- Helper Functions ---
+    // Query for player entities
+    const playerQuery = defineQuery([Player, MeshRef, FPController]);
+    const localPlayerQuery = defineQuery([LocalPlayer, MeshRef, FPController]);
     
-    /**
-     * Sets up animations for a player entity from the base model animations
-     */
-    function setupPlayerAnimations(eid: number, model: THREE.Object3D) {
-        if (!baseModelLoaded || !model) return;
-
-        // Find animation root (usually the model itself or an armature/skeleton)
-        let animationRoot = model;
-        model.traverse(node => {
-            if (node.name.toLowerCase().includes('armature') || 
-                node.name.toLowerCase().includes('rig') || 
-                node.name.toLowerCase().includes('skeleton')) {
-                animationRoot = node;
-                return;
-            }
-        });
-
-        // Create animation mixer
-        const mixer = new THREE.AnimationMixer(animationRoot);
-        const actions: Record<string, THREE.AnimationAction> = {};
+    // Animation variables
+    let playerModel: THREE.Group | null = null;
+    let animationStateMachine: AnimationStateMachine | null = null;
+    
+    // Legacy animation system variables (for backward compatibility)
+    let mixer: THREE.AnimationMixer | null = null;
+    let animations: Map<string, THREE.AnimationAction> = new Map();
+    let currentAnimation: string | null = null;
+    let activeAction: THREE.AnimationAction | null = null;
+    
+    // Movement tracking
+    let movementState = "idle"; // Current movement state: "idle" or "walking"
+    let movementTimer = 0; // Timer to prevent rapid state changes
+    let movementBuffer = [false, false, false, false, false]; // Buffer last 5 movement samples
+    let bufferIndex = 0;
+    
+    // Regular check to ensure animation is playing
+    let animationCheckTimer = 0;
+    
+    // Load player model
+    const loader = new GLTFLoader();
+    loader.load('/models/playermodel.glb', (gltf) => {
+        console.log('Player model loaded:', gltf);
         
-        // Disable error logging for missing bones to avoid console spam
-        const originalConsoleError = console.error;
-        console.error = function() {}; // Temporarily suppress errors
-
-        // Process all animations
-        baseModelAnimations.forEach(clip => {
-            try {
+        // Store the model for later use
+        playerModel = gltf.scene;
+        
+        // Process the model differently based on camera mode
+        if (PlayerSystemConfig.USE_FULLBODY_FPS) {
+            // Advanced animation state machine for full-body FPS
+            setupFullBodyFPS(gltf);
+        } else {
+            // Legacy animation system for traditional camera
+            setupLegacyAnimations(gltf);
+        }
+        
+        // Add model to scene and player
+        if (playerModel) {
+            // Scale and position adjustments
+            playerModel.scale.set(1, 1, 1);
+            
+            // Get player entity and attach model to player
+            const playerEntities = playerQuery(world);
+            if (playerEntities.length > 0) {
+                const pid = playerEntities[0];
+                const holder = world.ctx.maps.mesh.get(pid);
+                
+                if (holder) {
+                    // Position the model relative to the player's position
+                    // Fix: Adjust Y position to prevent sinking into ground
+                    playerModel.position.set(0, -0.9, 0);
+                    playerModel.rotation.y = Math.PI; // Face the camera by default
+                    
+                    // Add model to player holder
+                    holder.add(playerModel);
+                    
+                    // Log bone names for debugging/reference
+                    console.log("--------- BONE NAMES ---------");
+                    playerModel.traverse((object) => {
+                        if (object instanceof THREE.Bone) {
+                            console.log("Bone:", object.name);
+                        }
+                    });
+                    
+                    // Start with idle animation
+                    if (PlayerSystemConfig.USE_FULLBODY_FPS) {
+                        if (animationStateMachine) {
+                            animationStateMachine.setState(PlayerAnimationState.IDLE);
+                        }
+                    } else {
+                        setAnimation("idle");
+                    }
+                }
+            }
+        }
+    });
+    
+    // Setup for full-body FPS animation system
+    function setupFullBodyFPS(gltf: any) {
+        if (!playerModel) return;
+        
+        // Create the animation state machine
+        animationStateMachine = new AnimationStateMachine(
+            playerModel,
+            gltf.animations,
+            true // Enable debug logging
+        );
+        
+        console.log("Full-body FPS animation system initialized");
+    }
+    
+    // Setup for legacy animation system
+    function setupLegacyAnimations(gltf: any) {
+        if (!playerModel) return;
+        
+        // Set up animation mixer
+        mixer = new THREE.AnimationMixer(playerModel);
+        
+        // Process animations
+        gltf.animations.forEach((clip: THREE.AnimationClip) => {
+            // Create actions for each animation clip
+            if (mixer) {
                 const action = mixer.clipAction(clip);
-                const standardName = getStandardizedAnimationName(clip.name);
                 
-                // Configure action for smooth looping
-                if (standardName === 'idle' || standardName === 'walk' || standardName === 'run') {
-                    action.setLoop(THREE.LoopRepeat, Infinity);
+                // Store by name for easier access
+                if (clip.name.toLowerCase().includes('idle')) {
+                    animations.set('idle', action);
+                    console.log(`Animation loaded: ${clip.name} (IDLE)`);
+                } else if (clip.name.toLowerCase().includes('walk')) {
+                    animations.set('walking', action);
+                    console.log(`Animation loaded: ${clip.name} (WALKING)`);
                 } else {
-                    action.setLoop(THREE.LoopOnce, 1);
-                    action.clampWhenFinished = true;
+                    console.log(`Other animation loaded: ${clip.name}`);
                 }
-                
-                actions[standardName] = action;
-            } catch (error) {
-                // Silently ignore animation errors
             }
         });
-
-        // Restore console.error
-        console.error = originalConsoleError;
-
-        // Find default idle action and play it
-        let currentAction: THREE.AnimationAction | null = null;
-        if (actions['idle']) {
-            currentAction = actions['idle'];
-            currentAction.play();
-        }
-
-        // Store animation data for this entity
-        playerAnimationData.set(eid, { mixer, actions, currentAction, model });
-        console.log(`Animation setup complete for player entity ${eid}`);
-    }
-
-    /**
-     * Fades smoothly from one animation to another
-     */
-    function fadeToAction(eid: number, actionName: string, duration: number = 0.2) {
-        const data = playerAnimationData.get(eid);
-        if (!data || !data.actions[actionName]) return;
-
-        const nextAction = data.actions[actionName];
-        const previousAction = data.currentAction;
-
-        if (previousAction === nextAction) return; // Already playing
-
-        nextAction.enabled = true;
-        nextAction.setEffectiveTimeScale(1);
-        nextAction.setEffectiveWeight(1);
-        nextAction.time = 0; // Reset time when fading in
-
-        if (previousAction) {
-            previousAction.fadeOut(duration);
-        }
-
-        nextAction.reset().fadeIn(duration).play();
-        data.currentAction = nextAction;
-    }
-
-    /**
-     * Creates and attaches a player model to the local player
-     */
-    function createLocalPlayerModel(eid: number) {
-        if (playerAnimationData.has(eid)) return; // Already set up
         
-        const playerObj = world.ctx.maps.mesh.get(eid);
-        if (!playerObj || !baseModelLoaded) return;
+        // Configure all animations
+        animations.forEach(action => {
+            // Ensure animations loop infinitely and never stop
+            action.setLoop(THREE.LoopRepeat, Infinity);
+            action.clampWhenFinished = false;
+            action.timeScale = 1;
+            action.setEffectiveWeight(1);
+            action.enabled = true;
+            
+            // Disable automatic deactivation
+            action.zeroSlopeAtEnd = false;
+            action.zeroSlopeAtStart = false;
+        });
         
-        console.log("Setting up local player model...");
-        const loader = new GLTFLoader();
-        loader.load('/models/playermodel.glb', (gltf) => {
-            const model = gltf.scene.clone(); // Clone to avoid reference issues
-            
-            // The model should be at the center of the player
-            model.position.set(0, -0.9, 0); // Offset to align with ground
-            
-            // Don't add rotation - let the transform system handle it
-            model.rotation.y = Math.PI; // Face forward by default
-
-            // Add model to player holder
-            playerObj.add(model);
-            
-            // Setup animations
-            setupPlayerAnimations(eid, model);
-            
-            console.log("Local player model loaded and attached.");
-        });
+        console.log("Legacy animation system initialized");
     }
-
-    // System function
-    return (w: ECS, localPlayerEid?: number) => {
-        // --- Check and initialize local player model if needed ---
-        if (localPlayerEid !== undefined && !playerAnimationData.has(localPlayerEid)) {
-            createLocalPlayerModel(localPlayerEid);
+    
+    // Simple animation switch without complex crossfading (legacy)
+    function setAnimation(state: string) {
+        // Only used in legacy animation mode
+        if (PlayerSystemConfig.USE_FULLBODY_FPS) return;
+        
+        // Ignore if we're already in this state or animations not loaded
+        if (state === movementState || !animations.has(state === "walking" ? "walking" : "idle")) {
+            return;
         }
-
-        // --- Update Mixers with delta time ---
-        const delta = w.time.dt;
-        playerAnimationData.forEach(data => {
-            if (data.mixer) data.mixer.update(delta);
-        });
-
-        // --- Determine and Set Animation State for Local Player ---
-        if (localPlayerEid !== undefined && hasComponent(w, FPController, localPlayerEid)) {
-            const moveState = FPController.moveState[localPlayerEid];
-            let targetAnimationState = PlayerAnimationState.IDLE;
-
+        
+        // Update state
+        movementState = state;
+        console.log(`Changing animation to ${state}`);
+        
+        // Get the new animation
+        let newAction: THREE.AnimationAction | null = null;
+        
+        if (state === "walking") {
+            const walkAction = animations.get("walking");
+            if (walkAction) {
+                newAction = walkAction;
+            }
+        } else {
+            const idleAction = animations.get("idle");
+            if (idleAction) {
+                newAction = idleAction;
+            }
+        }
+        
+        // Only proceed if we have a valid action
+        if (!newAction) return;
+        
+        // Fade between animations - smoother transition
+        if (activeAction && activeAction !== newAction) {
+            // Prepare new action
+            newAction.reset();
+            newAction.setEffectiveWeight(1);
+            newAction.enabled = true;
+            newAction.play();
+            
+            // Fade from current to new
+            newAction.crossFadeFrom(activeAction, 0.2, true);
+        } else {
+            // First animation or direct switch
+            newAction.enabled = true;
+            newAction.reset();
+            newAction.play();
+        }
+        
+        // Update current animation state
+        activeAction = newAction;
+        currentAnimation = state === "walking" ? "walking" : "idle";
+        
+        // Set timeout before next state change is allowed
+        movementTimer = 0.3; // 300ms debounce
+    }
+    
+    // Ensure an animation is playing (fallback to idle) - legacy
+    function ensureAnimationPlaying() {
+        // Only used in legacy animation mode
+        if (PlayerSystemConfig.USE_FULLBODY_FPS) return;
+        
+        if (!mixer || !animations.size) return;
+        
+        // Check if any action is currently running
+        let isAnimationActive = false;
+        
+        // Check if the active action is properly running
+        if (activeAction && activeAction.isRunning()) {
+            isAnimationActive = true;
+        }
+        
+        if (!isAnimationActive) {
+            console.log("No active animation detected, resetting to idle");
+            
+            // Force idle animation to play
+            const idleAction = animations.get("idle");
+            if (idleAction) {
+                // Stop all potentially paused actions
+                mixer.stopAllAction();
+                
+                // Reset action state
+                idleAction.reset();
+                idleAction.setEffectiveWeight(1);
+                idleAction.enabled = true;
+                idleAction.play();
+                
+                // Update current state
+                activeAction = idleAction;
+                currentAnimation = "idle";
+                movementState = "idle";
+            }
+        }
+    }
+    
+    // Check if player is moving based on position buffer
+    function isPlayerMoving() {
+        // Count true values in buffer
+        const movingFrames = movementBuffer.filter(moving => moving).length;
+        // Consider moving if at least 3 of the last 5 frames showed movement
+        return movingFrames >= 3;
+    }
+    
+    // Update animation state based on entity state
+    function updateAnimationState(eid: number, isMoving: boolean, isSprinting: boolean) {
+        // Use the appropriate animation system based on config
+        if (PlayerSystemConfig.USE_FULLBODY_FPS) {
+            if (!animationStateMachine) return;
+            
+            // Determine the appropriate animation state
+            let targetState = PlayerAnimationState.IDLE;
+            
+            // Get the move state (grounded, jumping, falling)
+            const moveState = FPController.moveState[eid];
+            
             if (moveState === MovementState.JUMPING) {
-                targetAnimationState = PlayerAnimationState.JUMPING;
+                targetState = PlayerAnimationState.JUMPING;
             } else if (moveState === MovementState.FALLING) {
-                targetAnimationState = PlayerAnimationState.FALLING;
-            } else if (moveState === MovementState.GROUNDED) {
-                // Check horizontal velocity magnitude for walking/running
-                const rb = w.ctx.maps.rb.get(localPlayerEid);
-                let speedSq = 0;
-                if (rb) {
-                    const linvel = rb.linvel();
-                    speedSq = linvel.x * linvel.x + linvel.z * linvel.z;
-                }
-
-                if (speedSq > 50) { // Running threshold
-                    targetAnimationState = PlayerAnimationState.RUNNING;
-                } else if (speedSq > 0.1) { // Walking threshold
-                    targetAnimationState = PlayerAnimationState.WALKING;
+                targetState = PlayerAnimationState.FALLING;
+            } else {
+                // Player is grounded
+                if (isMoving) {
+                    targetState = isSprinting ? 
+                        PlayerAnimationState.RUNNING : 
+                        PlayerAnimationState.WALKING;
                 } else {
-                    targetAnimationState = PlayerAnimationState.IDLE;
+                    targetState = PlayerAnimationState.IDLE;
                 }
             }
-
-            // Update animation state component for network sync
-            if (AnimationState.state[localPlayerEid] !== targetAnimationState) {
-                AnimationState.state[localPlayerEid] = targetAnimationState;
-                console.log(`Local animation state changed to: ${targetAnimationState}`);
-            }
-        }
-
-        // --- Apply Animations Based on State for ALL Players ---
-        const allPlayers = playerQuery(w);
-        for (const eid of allPlayers) {
-            const isLocal = localPlayerEid === eid;
-            const data = playerAnimationData.get(eid);
             
-            // Skip if no animation data yet
-            if (!data) {
-                const model = w.ctx.maps.mesh.get(eid);
-                // Check if this is a remote player model and set it up
-                if (model && baseModelLoaded && hasComponent(w, RemotePlayer, eid)) {
-                    setupPlayerAnimations(eid, model);
+            // Apply the state change
+            animationStateMachine.setState(targetState);
+            
+            // Update the Animation component with the current state
+            AnimationState.state[eid] = targetState;
+        } else {
+            // Legacy animation system
+            if (movementTimer <= 0) {
+                if (isMoving && movementState !== "walking") {
+                    setAnimation("walking");
+                } else if (!isMoving && movementState !== "idle") {
+                    setAnimation("idle");
                 }
-                continue;
-            }
-
-            // Get current animation state
-            const currentState = AnimationState.state[eid];
-            let targetActionName = 'idle'; // Default animation
-
-            // Convert animation state enum to action name
-            switch (currentState) {
-                case PlayerAnimationState.WALKING: 
-                    targetActionName = 'walk'; 
-                    break;
-                case PlayerAnimationState.RUNNING: 
-                    targetActionName = 'run'; 
-                    break;
-                case PlayerAnimationState.JUMPING: 
-                    targetActionName = 'jump_start'; 
-                    break;
-                case PlayerAnimationState.FALLING: 
-                    targetActionName = 'jump_fall'; 
-                    break;
-                case PlayerAnimationState.SHOOTING: 
-                    targetActionName = 'shoot'; 
-                    break;
-                case PlayerAnimationState.DEATH: 
-                    targetActionName = 'death'; 
-                    break;
-                case PlayerAnimationState.IDLE:
-                default: 
-                    targetActionName = 'idle'; 
-                    break;
-            }
-
-            // Check if we have this animation or need a fallback
-            if (!data.actions[targetActionName]) {
-                // Fallback logic
-                if (targetActionName === 'run' && data.actions['walk']) {
-                    targetActionName = 'walk';
-                } else if ((targetActionName === 'jump_start' || targetActionName === 'jump_fall') && 
-                           data.actions['jump']) {
-                    targetActionName = 'jump';
-                } else if (!data.actions['idle']) {
-                    // No idle animation - just use first available animation
-                    const firstAction = Object.keys(data.actions)[0];
-                    if (firstAction) targetActionName = firstAction;
-                    else continue; // No animations available
-                } else {
-                    targetActionName = 'idle'; // Default fallback
-                }
-            }
-
-            // Apply animation if different from current
-            if (data.actions[targetActionName] && data.currentAction !== data.actions[targetActionName]) {
-                fadeToAction(eid, targetActionName);
             }
         }
-
+    }
+    
+    return (w: ECS) => {
+        // Update timers
+        if (movementTimer > 0) {
+            movementTimer -= w.time.dt;
+        }
+        
+        // Increment animation check timer
+        animationCheckTimer += w.time.dt;
+        
+        // Update based on animation mode
+        if (PlayerSystemConfig.USE_FULLBODY_FPS) {
+            // Full-body FPS animation updates
+            if (animationStateMachine) {
+                animationStateMachine.update(w.time.dt);
+            }
+        } else {
+            // Legacy animation checks and updates
+            if (mixer && playerModel) {
+                // Check animation state regularly to prevent T-pose
+                if (animationCheckTimer > 1.0) { // Check every second
+                    ensureAnimationPlaying();
+                    animationCheckTimer = 0;
+                }
+                
+                // Update animation mixer
+                mixer.update(w.time.dt);
+            } else {
+                return w; // Skip rest of function if no animations
+            }
+        }
+        
+        // Process both player and localPlayer entities
+        // In most cases, entities will have both components
+        const entities = new Set([...playerQuery(w), ...localPlayerQuery(w)]);
+        
+        for (const eid of entities) {
+            const holder = w.ctx.maps.mesh.get(eid);
+            
+            if (holder) {
+                // Initialize previous position if needed
+                if (!w.time.prevPlayerPos) {
+                    w.time.prevPlayerPos = new THREE.Vector3(holder.position.x, holder.position.y, holder.position.z);
+                    continue; // Skip this frame as we need two positions to compare
+                }
+                
+                // Calculate horizontal movement (ignore Y)
+                const deltaX = holder.position.x - w.time.prevPlayerPos.x;
+                const deltaZ = holder.position.z - w.time.prevPlayerPos.z;
+                const movementSq = deltaX * deltaX + deltaZ * deltaZ;
+                
+                // Store in moving buffer (true if moving, false if not)
+                movementBuffer[bufferIndex] = movementSq > 0.0005;
+                bufferIndex = (bufferIndex + 1) % movementBuffer.length;
+                
+                // Determine movement state
+                const isMoving = isPlayerMoving();
+                const isSprinting = w.input?.sprint || false;
+                
+                // Update animation state
+                updateAnimationState(eid, isMoving, isSprinting);
+                
+                // Store current position for next frame
+                w.time.prevPlayerPos.set(holder.position.x, holder.position.y, holder.position.z);
+            }
+        }
+        
         return w;
     };
 }
 
 ================================================
+File: /src/ecs/systems/player/controlPanel.ts
+================================================
+/**
+ * Control panel for the FPS full-body camera settings
+ */
+import { FPSBodySettings } from './fpsBodySystem';
+import { PlayerSystemConfig } from './index';
+
+// Settings categories
+interface SettingsCategory {
+  title: string;
+  settings: Setting[];
+  expanded: boolean;
+}
+
+// Individual setting
+interface Setting {
+  name: string;
+  type: 'slider' | 'checkbox' | 'vector3';
+  min?: number;
+  max?: number;
+  get: () => any;
+  set: (val: any) => void;
+  step?: number;
+  description?: string;
+}
+
+export function createControlPanel() {
+  // If control panel is disabled, do nothing
+  if (!PlayerSystemConfig.SHOW_CONTROL_PANEL) {
+    return;
+  }
+  
+  // Check if panel already exists
+  if (document.getElementById('fpsControlPanel')) {
+    return;
+  }
+  
+  // Create categories of settings
+  const categories: SettingsCategory[] = [
+    {
+      title: 'Camera Positioning',
+      expanded: true,
+      settings: [
+        {
+          name: 'Camera Offset X',
+          type: 'slider',
+          min: -50,
+          max: 50,
+          step: 1,
+          get: () => FPSBodySettings.CAMERA_OFFSET.x,
+          set: (val) => FPSBodySettings.CAMERA_OFFSET.x = val,
+          description: 'Left/right camera offset from eye position'
+        },
+        {
+          name: 'Camera Offset Y',
+          type: 'slider',
+          min: -50,
+          max: 50,
+          step: 1,
+          get: () => FPSBodySettings.CAMERA_OFFSET.y,
+          set: (val) => FPSBodySettings.CAMERA_OFFSET.y = val,
+          description: 'Up/down camera offset from eye position'
+        },
+        {
+          name: 'Camera Offset Z',
+          type: 'slider',
+          min: -50,
+          max: 50,
+          step: 1,
+          get: () => FPSBodySettings.CAMERA_OFFSET.z,
+          set: (val) => FPSBodySettings.CAMERA_OFFSET.z = val,
+          description: 'Forward/backward camera offset from eye position'
+        }
+      ]
+    },
+    {
+      title: 'Debug',
+      expanded: true,
+      settings: [
+        {
+          name: 'Debug Visualization',
+          type: 'checkbox',
+          get: () => FPSBodySettings.DEBUG_VISUALIZATION,
+          set: (val) => FPSBodySettings.DEBUG_VISUALIZATION = val,
+          description: 'Show helpers for skeleton, bones, etc.'
+        }
+      ]
+    }
+  ];
+  
+  // Create panel container
+  const panel = document.createElement('div');
+  panel.id = 'fpsControlPanel';
+  panel.style.position = 'fixed';
+  panel.style.top = '10px';
+  panel.style.right = '10px';
+  panel.style.backgroundColor = 'rgba(0, 0, 0, 0.7)';
+  panel.style.color = 'white';
+  panel.style.padding = '10px';
+  panel.style.borderRadius = '5px';
+  panel.style.zIndex = '1000';
+  panel.style.width = '300px';
+  panel.style.fontFamily = 'Arial, sans-serif';
+  panel.style.maxHeight = '80vh';
+  panel.style.overflowY = 'auto';
+  
+  // Header
+  const header = document.createElement('div');
+  header.textContent = 'FPS Camera Settings';
+  header.style.fontWeight = 'bold';
+  header.style.marginBottom = '10px';
+  header.style.borderBottom = '1px solid #555';
+  header.style.paddingBottom = '5px';
+  panel.appendChild(header);
+  
+  // Toggle button to show/hide panel
+  const toggleButton = document.createElement('button');
+  toggleButton.textContent = 'Hide';
+  toggleButton.style.position = 'absolute';
+  toggleButton.style.top = '10px';
+  toggleButton.style.right = '10px';
+  toggleButton.style.backgroundColor = '#555';
+  toggleButton.style.border = 'none';
+  toggleButton.style.color = 'white';
+  toggleButton.style.padding = '2px 5px';
+  toggleButton.style.borderRadius = '3px';
+  toggleButton.style.cursor = 'pointer';
+  panel.appendChild(toggleButton);
+  
+  // Content container
+  const content = document.createElement('div');
+  content.id = 'fpsControlPanelContent';
+  panel.appendChild(content);
+  
+  // Toggle panel visibility
+  let isPanelVisible = true;
+  toggleButton.addEventListener('click', () => {
+    isPanelVisible = !isPanelVisible;
+    content.style.display = isPanelVisible ? 'block' : 'none';
+    toggleButton.textContent = isPanelVisible ? 'Hide' : 'Show';
+  });
+  
+  // Create sections for each category
+  categories.forEach(category => {
+    const section = document.createElement('div');
+    section.style.marginBottom = '15px';
+    
+    // Category header
+    const categoryHeader = document.createElement('div');
+    categoryHeader.textContent = category.title;
+    categoryHeader.style.fontWeight = 'bold';
+    categoryHeader.style.marginBottom = '5px';
+    categoryHeader.style.cursor = 'pointer';
+    categoryHeader.style.backgroundColor = 'rgba(80, 80, 80, 0.5)';
+    categoryHeader.style.padding = '3px 5px';
+    categoryHeader.style.borderRadius = '3px';
+    section.appendChild(categoryHeader);
+    
+    // Category content
+    const categoryContent = document.createElement('div');
+    categoryContent.style.display = category.expanded ? 'block' : 'none';
+    categoryContent.style.paddingLeft = '10px';
+    section.appendChild(categoryContent);
+    
+    // Toggle category expansion
+    categoryHeader.addEventListener('click', () => {
+      category.expanded = !category.expanded;
+      categoryContent.style.display = category.expanded ? 'block' : 'none';
+    });
+    
+    // Add each setting
+    category.settings.forEach(setting => {
+      const settingContainer = document.createElement('div');
+      settingContainer.style.marginBottom = '8px';
+      
+      // Setting label
+      const label = document.createElement('div');
+      label.textContent = setting.name;
+      label.style.marginBottom = '2px';
+      settingContainer.appendChild(label);
+      
+      // Setting tooltip (description)
+      if (setting.description) {
+        label.title = setting.description;
+        label.style.cursor = 'help';
+      }
+      
+      if (setting.type === 'slider') {
+        // Create slider container
+        const sliderContainer = document.createElement('div');
+        sliderContainer.style.display = 'flex';
+        sliderContainer.style.alignItems = 'center';
+        
+        // Slider input
+        const slider = document.createElement('input');
+        slider.type = 'range';
+        slider.min = setting.min!.toString();
+        slider.max = setting.max!.toString();
+        slider.step = setting.step?.toString() || '0.01';
+        slider.value = setting.get().toString();
+        slider.style.flex = '1';
+        
+        // Value display
+        const valueDisplay = document.createElement('span');
+        valueDisplay.textContent = Number(slider.value).toFixed(2);
+        valueDisplay.style.marginLeft = '10px';
+        valueDisplay.style.width = '40px';
+        valueDisplay.style.textAlign = 'right';
+        
+        // Update on input
+        slider.addEventListener('input', () => {
+          const value = parseFloat(slider.value);
+          valueDisplay.textContent = value.toFixed(2);
+          setting.set(value);
+        });
+        
+        sliderContainer.appendChild(slider);
+        sliderContainer.appendChild(valueDisplay);
+        settingContainer.appendChild(sliderContainer);
+      } else if (setting.type === 'checkbox') {
+        // Create checkbox
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.checked = setting.get();
+        checkbox.id = `setting_${setting.name.replace(/\s+/g, '_')}`;
+        
+        // Create label
+        const checkLabel = document.createElement('label');
+        checkLabel.htmlFor = checkbox.id;
+        checkLabel.textContent = `Enable ${setting.name}`;
+        checkLabel.style.marginLeft = '5px';
+        
+        // Update on change
+        checkbox.addEventListener('change', () => {
+          setting.set(checkbox.checked);
+        });
+        
+        // Add to container
+        const checkboxContainer = document.createElement('div');
+        checkboxContainer.appendChild(checkbox);
+        checkboxContainer.appendChild(checkLabel);
+        settingContainer.appendChild(checkboxContainer);
+      } else if (setting.type === 'vector3') {
+        // Not implemented in this basic control panel
+        const notImplemented = document.createElement('div');
+        notImplemented.textContent = 'Vector3 controls not implemented';
+        notImplemented.style.color = '#aaa';
+        notImplemented.style.fontStyle = 'italic';
+        notImplemented.style.fontSize = '0.8em';
+        settingContainer.appendChild(notImplemented);
+      }
+      
+      categoryContent.appendChild(settingContainer);
+    });
+    
+    content.appendChild(section);
+  });
+  
+  // Reset button
+  const resetButton = document.createElement('button');
+  resetButton.textContent = 'Reset to Defaults';
+  resetButton.style.backgroundColor = '#555';
+  resetButton.style.border = 'none';
+  resetButton.style.color = 'white';
+  resetButton.style.padding = '5px 10px';
+  resetButton.style.borderRadius = '3px';
+  resetButton.style.cursor = 'pointer';
+  resetButton.style.width = '100%';
+  resetButton.style.marginTop = '10px';
+  
+  resetButton.addEventListener('click', () => {
+    // Reset settings to defaults
+    FPSBodySettings.CAMERA_OFFSET.set(0, 16, 33);
+    FPSBodySettings.DEBUG_VISUALIZATION = false;
+    
+    // Update UI elements with new values
+    document.querySelectorAll('#fpsControlPanelContent input').forEach(input => {
+      if (input instanceof HTMLInputElement) {
+        const containerDiv = input.closest('div')?.parentElement;
+        if (!containerDiv) return;
+        
+        // Find the setting this input corresponds to
+        let foundSetting: Setting | undefined;
+        for (const category of categories) {
+          foundSetting = category.settings.find(s => 
+            containerDiv.querySelector('div')?.textContent === s.name
+          );
+          if (foundSetting) break;
+        }
+        
+        if (foundSetting) {
+          if (input.type === 'range') {
+            input.value = foundSetting.get().toString();
+            const valueDisplay = input.nextElementSibling as HTMLElement;
+            if (valueDisplay) {
+              valueDisplay.textContent = Number(input.value).toFixed(2);
+            }
+          } else if (input.type === 'checkbox') {
+            input.checked = foundSetting.get();
+          }
+        }
+      }
+    });
+    
+    // Force settings update event
+    const refreshEvent = new CustomEvent('fps-settings-changed', { 
+      detail: { settings: FPSBodySettings } 
+    });
+    document.dispatchEvent(refreshEvent);
+    
+    console.log('FPS Camera settings reset to defaults');
+  });
+  
+  content.appendChild(resetButton);
+  
+  // Apply button to force refresh settings
+  const applyButton = document.createElement('button');
+  applyButton.textContent = 'Apply Changes';
+  applyButton.style.backgroundColor = '#3a7d34';
+  applyButton.style.border = 'none';
+  applyButton.style.color = 'white';
+  applyButton.style.padding = '5px 10px';
+  applyButton.style.borderRadius = '3px';
+  applyButton.style.cursor = 'pointer';
+  applyButton.style.width = '100%';
+  applyButton.style.marginTop = '10px';
+  applyButton.style.marginBottom = '5px';
+  
+  applyButton.addEventListener('click', () => {
+    // Force refresh by triggering events
+    const refreshEvent = new CustomEvent('fps-settings-changed', { 
+      detail: { settings: FPSBodySettings } 
+    });
+    document.dispatchEvent(refreshEvent);
+    console.log('Applied FPS Camera settings');
+  });
+  
+  content.appendChild(applyButton);
+  
+  // Add panel to document body
+  document.body.appendChild(panel);
+  
+  // Setup event listener for settings changes
+  document.addEventListener('fps-settings-changed', () => {
+    // This will be used by other systems to react to setting changes
+    console.log('FPS settings changed event triggered');
+  });
+  
+  return panel;
+} 
+
+================================================
+File: /src/ecs/systems/player/fpsBodySystem.ts
+================================================
+/**
+ * Simplified FPS Full Body Camera System
+ */
+import { defineQuery } from 'bitecs';
+import * as THREE from 'three';
+import { Player, LocalPlayer, FPController, MeshRef } from '../../components';
+import { ECS } from '../../world';
+
+// Simplified settings for FPS body camera system
+export const FPSBodySettings = {
+  // Camera position relative to head
+  CAMERA_OFFSET: new THREE.Vector3(0, 16, 33),
+  
+  // Debug visualization
+  DEBUG_VISUALIZATION: false,
+};
+
+export function initFPSBodySystem(world: ECS) {
+  // Query for player entities
+  const localPlayerQuery = defineQuery([LocalPlayer, FPController, MeshRef]);
+  const playerQuery = defineQuery([Player, FPController, MeshRef]);
+  
+  // Reference objects
+  let playerModel: THREE.Group | null = null;
+  let skeletonHelper: THREE.SkeletonHelper | null = null;
+  let headBone: THREE.Bone | null = null;
+  
+  // Camera holder
+  let cameraHolder: THREE.Object3D | null = null;
+  
+  // Current state
+  let isSetup = false;
+  
+  // Add event listener for settings changes
+  document.addEventListener('fps-settings-changed', () => {
+    if (cameraHolder && isSetup) {
+      // Update camera position from settings
+      cameraHolder.position.copy(FPSBodySettings.CAMERA_OFFSET);
+      console.log('FPS camera settings updated');
+    }
+  });
+  
+  // Setup function - called when player model is loaded and ready
+  function setupFPSBody(w: ECS, playerEntity: number) {
+    if (isSetup) return;
+    
+    const holder = w.ctx.maps.mesh.get(playerEntity);
+    if (!holder) return;
+    
+    // Find the player model
+    holder.traverse((child) => {
+      if (child.type === 'Group' && child.children.length > 0) {
+        playerModel = child as THREE.Group;
+      }
+    });
+    
+    if (!playerModel) {
+      console.log("Player model not found, waiting...");
+      return;
+    }
+    
+    // Create camera holder
+    cameraHolder = new THREE.Object3D();
+    cameraHolder.name = "fpsBodyCameraHolder";
+    
+    // Find head bone
+    playerModel.traverse((object) => {
+      if (object instanceof THREE.Bone) {
+        // Find head bone
+        if (object.name === 'mixamorigHead') {
+          headBone = object;
+        }
+        
+        if (FPSBodySettings.DEBUG_VISUALIZATION) {
+          // Add tiny markers to visualize bone positions
+          const marker = new THREE.Mesh(
+            new THREE.SphereGeometry(0.02, 8, 8),
+            new THREE.MeshBasicMaterial({ color: 0xff0000 })
+          );
+          object.add(marker);
+        }
+      }
+    });
+    
+    // If we found the head bone, set up the camera
+    if (headBone) {
+      // Attach camera holder to head bone
+      headBone.add(cameraHolder);
+      
+      // Position the camera holder at the eye position
+      cameraHolder.position.copy(FPSBodySettings.CAMERA_OFFSET);
+      
+      // Add skeleton helper for debug visualization
+      if (FPSBodySettings.DEBUG_VISUALIZATION && playerModel) {
+        skeletonHelper = new THREE.SkeletonHelper(playerModel);
+        w.ctx.three.scene.add(skeletonHelper);
+      }
+      
+      // Move camera to the new setup
+      w.ctx.three.camera.position.set(0, 0, 0);
+      w.ctx.three.camera.rotation.set(0, 0, 0);
+      
+      // FIX: Rotate camera 180 degrees so it faces forward instead of backward
+      const fixRotation = new THREE.Euler(0, Math.PI, 0);
+      const fixQuaternion = new THREE.Quaternion().setFromEuler(fixRotation);
+      cameraHolder.quaternion.multiply(fixQuaternion);
+      
+      // Add camera to holder
+      cameraHolder.add(w.ctx.three.camera);
+      
+      // Fix for clipping plane issues - adjust near and far planes
+      if (w.ctx.three.camera instanceof THREE.PerspectiveCamera) {
+        w.ctx.three.camera.near = 0.1;
+        w.ctx.three.camera.far = 10000;
+        w.ctx.three.camera.updateProjectionMatrix();
+      }
+      
+      console.log("Simplified FPS Body Camera setup complete!");
+      isSetup = true;
+    } else {
+      console.warn("Head bone not found in the model - cannot setup FPS camera");
+    }
+  }
+  
+  // Function to ensure camera remains properly attached to head
+  function ensureCameraFixedToHead() {
+    if (!isSetup || !headBone || !cameraHolder) return;
+    
+    // Force update world matrices to ensure correct positioning
+    headBone.updateWorldMatrix(true, false);
+    
+    // Make sure camera holder has the correct offset
+    cameraHolder.position.copy(FPSBodySettings.CAMERA_OFFSET);
+    
+    // Ensure camera is correctly oriented
+    cameraHolder.updateMatrixWorld(true);
+  }
+  
+  // Main system function
+  return (w: ECS) => {
+    // Get entities
+    const localEntities = localPlayerQuery(w);
+    const entities = localEntities.length > 0 ? localEntities : playerQuery(w);
+    
+    if (entities.length === 0) return w;
+    
+    // Just use the first player entity
+    const pid = entities[0];
+    
+    // Setup if not already done
+    if (!isSetup) {
+      setupFPSBody(w, pid);
+      if (!isSetup) return w; // Exit if setup not completed
+      
+      // Ensure scene has proper render settings
+      if (w.ctx.three && w.ctx.three.scene) {
+        console.log("Ensuring proper scene setup");
+        w.ctx.three.scene.background = new THREE.Color(0x87CEEB); // Sky blue
+        
+        // Make sure fog is disabled as it can cause visual issues
+        w.ctx.three.scene.fog = null;
+        
+        // Fix for scene renderer
+        if (w.ctx.three.renderer) {
+          // Enable logarithmic depth buffer to fix z-fighting at large distances
+          (w.ctx.three.renderer as any).physicallyCorrectLights = true;
+          w.ctx.three.renderer.shadowMap.enabled = true;
+          
+          // Fix for position shifting with distance from origin
+          w.ctx.three.renderer.setPixelRatio(window.devicePixelRatio);
+          
+          console.log("Enhanced renderer setup complete");
+        }
+      }
+    }
+    
+    // Ensure camera is correctly positioned
+    ensureCameraFixedToHead();
+    
+    // Update skeleton helper if available
+    if (skeletonHelper) {
+      skeletonHelper.update();
+    }
+    
+    // Apply player pitch directly to camera
+    if (pid !== undefined && FPController.pitch[pid] !== undefined) {
+      w.ctx.three.camera.rotation.x = FPController.pitch[pid];
+    }
+    
+    return w;
+  };
+} 
+
+================================================
 File: /src/ecs/systems/player/index.ts
 ================================================
+/**
+ * Main player system that initializes and combines movement, look and shoot sub-systems
+ */
 import { addComponent, addEntity } from 'bitecs';
 import * as THREE from 'three';
 import {
-  MeshRef, RigidBodyRef, Transform, FPController, LocalPlayer, NetworkId, Health, AnimationState
+  MeshRef, Player, LocalPlayer, RigidBodyRef, Transform, FPController, NetworkId, Health, AnimationState
 } from '../../components';
 import { ECS } from '../../world';
 import { MovementState, PlayerAnimationState, PlayerConfig } from '../../config';
@@ -3131,83 +4201,109 @@ import { initPlayerMovementSystem } from './movementSystem';
 import { initPlayerLookSystem } from './lookSystem';
 import { initPlayerShootSystem } from './shootSystem';
 import { initPlayerAnimationSystem } from './animationSystem';
+import { initFPSBodySystem } from './fpsBodySystem.js';
+import { createControlPanel } from './controlPanel.js';
+
+// Configuration for the player system
+export const PlayerSystemConfig = {
+  // Flag to enable the full-body FPS camera
+  // When false, uses the traditional separate camera/model approach
+  USE_FULLBODY_FPS: true,
+  
+  // Control panel configuration
+  SHOW_CONTROL_PANEL: true
+};
 
 export function initPlayerSystem(world: ECS) {
   const { rapier, physics, three, maps } = world.ctx;
 
-  // Create the *local* player entity
+  /* entity + mesh holder ------------------------------------------- */
   const pid = addEntity(world);
-  addComponent(world, LocalPlayer,    pid); // Tag as LocalPlayer
-  addComponent(world, NetworkId,      pid); // Will be set by server init message
-  addComponent(world, Transform,      pid);
-  addComponent(world, MeshRef,        pid);
-  addComponent(world, RigidBodyRef,   pid);
-  addComponent(world, FPController,   pid);
-  addComponent(world, Health,         pid);
+  addComponent(world, Player,       pid);
+  addComponent(world, LocalPlayer,  pid); // Local player for network compatibility
+  addComponent(world, NetworkId,    pid); // NetworkId for multiplayer
+  addComponent(world, Transform,    pid);
+  addComponent(world, MeshRef,      pid);
+  addComponent(world, RigidBodyRef, pid);
+  addComponent(world, FPController, pid);
+  addComponent(world, Health,       pid);
   addComponent(world, AnimationState, pid);
-
-  NetworkId.id[pid] = 0; // Placeholder ID, server will assign correct one
+  
+  // Initialize network components
+  NetworkId.id[pid] = 0; // Will be set by server
   Health.current[pid] = PlayerConfig.MAX_HEALTH;
   Health.max[pid] = PlayerConfig.MAX_HEALTH;
-  AnimationState.state[pid] = PlayerAnimationState.IDLE; // Start in Idle state
-
+  AnimationState.state[pid] = PlayerAnimationState.IDLE;
+  
   // Initialize controller state
   FPController.pitch[pid] = 0;
   FPController.vertVel[pid] = 0;
   FPController.moveState[pid] = MovementState.GROUNDED;
   FPController.lastGrounded[pid] = performance.now();
   FPController.lastJump[pid] = 0;
+  FPController.lastShot[pid] = 0;
   FPController.jumpRequested[pid] = 0;
   FPController.lastJumpRequest[pid] = 0;
 
-  // --- Mesh Holder ---
+  // Create mesh holder
   const holder = new THREE.Object3D();
-  // Start position might be overridden by server 'init' message
-  holder.position.set(0, 10, 0); // Start higher above the ground to prevent falling through
+  holder.position.set(0, 3, 6);
   three.scene.add(holder);
-  maps.mesh.set(pid, holder); // Associate entity ID with the holder mesh
+  maps.mesh.set(pid, holder);
 
-  // Camera setup inside the holder
-  const cameraOffset = new THREE.Object3D();
-  cameraOffset.position.set(0, 1.7, 0); // Eye height - slightly higher than model head
-  holder.add(cameraOffset);
-  cameraOffset.add(three.camera);
+  // Set up camera - different setup depending on camera mode
+  if (!PlayerSystemConfig.USE_FULLBODY_FPS) {
+    // Traditional setup: camera directly parented to holder
+    const cameraOffset = new THREE.Object3D();
+    cameraOffset.position.set(0, 1.6, 0); // Eye height of ~1.6m
+    holder.add(cameraOffset);
+    cameraOffset.add(three.camera);
+  } else {
+    // For full-body FPS, just add a temporary reference
+    // The actual camera setup happens in the FPS body system
+    const tempCameraHolder = new THREE.Object3D();
+    tempCameraHolder.position.set(0, 1.6, 0);
+    holder.add(tempCameraHolder);
+    tempCameraHolder.add(three.camera);
+  }
 
-  // --- Rapier Body ---
+  // Initialize Quaternion in Transform component
+  const quaternion = new THREE.Quaternion();
+  holder.getWorldQuaternion(quaternion);
+  Transform.qx[pid] = quaternion.x;
+  Transform.qy[pid] = quaternion.y;
+  Transform.qz[pid] = quaternion.z;
+  Transform.qw[pid] = quaternion.w;
+
+  /* Rapier kinematic capsule --------------------------------------- */
   const rb = physics.createRigidBody(
     rapier.RigidBodyDesc.kinematicPositionBased()
           .setTranslation(holder.position.x, holder.position.y, holder.position.z)
-          .setCcdEnabled(true) // Keep CCD enabled for player potentially
+          .setCcdEnabled(true)
   );
-  
-  // Create a slightly smaller capsule collider to avoid getting stuck
   const collider = physics.createCollider(
-    rapier.ColliderDesc.capsule(0.8, 0.3) // Height 0.8, Radius 0.3
-      .setFriction(0.1)
-      .setDensity(1.0), // Set density for KCC interactions
-    rb
+    rapier.ColliderDesc.capsule(0.9, 0.3).setFriction(0.2), rb
   );
 
-  // --- Kinematic Character Controller ---
-  const kcc = physics.createCharacterController(0.02); // Slightly larger offset
+  const kcc = physics.createCharacterController(0.01);
   kcc.setApplyImpulsesToDynamicBodies(true);
-  kcc.enableAutostep(0.4, 0.4, true); // Adjusted auto-step parameters
-  kcc.enableSnapToGround(0.5); // Increased snap distance slightly
-  kcc.setSlideEnabled(true); // Enable sliding
+  kcc.setUp({ x: 0, y: 1, z: 0 });
+  kcc.enableAutostep(0.5, 0.3, true);
+  kcc.enableSnapToGround(0.3);
 
   maps.rb.set(pid, rb);
   RigidBodyRef.id[pid] = rb.handle;
-
-  // Store KCC and collider in world context
+  
+  // Store KCC and collider for use in movement system
   world.ctx.kcc = kcc;
   world.ctx.playerCollider = collider;
-
-  // Update entity handle map
+  
+  // Add to entity handle map for collision detection
   if (world.ctx.entityHandleMap) {
-      world.ctx.entityHandleMap.set(rb.handle, pid);
+    world.ctx.entityHandleMap.set(rb.handle, pid);
   } else {
-      world.ctx.entityHandleMap = new Map<number, number>();
-      world.ctx.entityHandleMap.set(rb.handle, pid);
+    world.ctx.entityHandleMap = new Map<number, number>();
+    world.ctx.entityHandleMap.set(rb.handle, pid);
   }
 
   // Initialize sub-systems
@@ -3215,25 +4311,33 @@ export function initPlayerSystem(world: ECS) {
   const lookSystem = initPlayerLookSystem(world);
   const shootSystem = initPlayerShootSystem(world);
   const animationSystem = initPlayerAnimationSystem(world);
+  
+  // Initialize FPS body system if enabled
+  const fpsBodySystem = PlayerSystemConfig.USE_FULLBODY_FPS ? 
+    initFPSBodySystem(world) : null;
+  
+  // Create control panel for camera settings if enabled
+  if (PlayerSystemConfig.SHOW_CONTROL_PANEL) {
+    createControlPanel();
+  }
 
-  // Combined system - runs sub-systems *only* for the local player
+  /* Combined system ------------------------------------------------- */
   return (w: ECS) => {
-    // Get local player entity ID from network if available, otherwise use the initial one
-    const localEid = w.ctx.localPlayerId !== null ? 
-      world.players.get(w.ctx.localPlayerId!) : pid;
+    // Ensure the correct order of system evaluation:
+    // 1. Look system (camera rotation)
+    // 2. Movement system (uses rotation for movement direction)
+    // 3. Shoot system (uses camera direction)
+    // 4. Animation system (based on movement state)
+    // 5. FPS body system (if enabled, updates camera position/rotation)
     
-    if (localEid !== undefined) {
-        // Run systems specifically for the local player entity
-        lookSystem(w, localEid);
-        movementSystem(w, localEid);
-        shootSystem(w, localEid);
-        animationSystem(w, localEid); // Animation system needs to run for local player
-    } else {
-        // Fallback in case network hasn't initialized player ID yet
-        lookSystem(w, pid);
-        movementSystem(w, pid);
-        shootSystem(w, pid);
-        animationSystem(w, pid);
+    lookSystem(w);     // Handle camera rotation first
+    movementSystem(w); // Apply movement based on new rotation
+    shootSystem(w);    // Handle shooting based on camera direction
+    animationSystem(w); // Update animations
+    
+    // Apply FPS body system if enabled
+    if (PlayerSystemConfig.USE_FULLBODY_FPS && fpsBodySystem) {
+      fpsBodySystem(w);
     }
     
     return w;
@@ -3243,247 +4347,233 @@ export function initPlayerSystem(world: ECS) {
 ================================================
 File: /src/ecs/systems/player/lookSystem.ts
 ================================================
-import { defineQuery, hasComponent } from 'bitecs';
+/**
+ * Player look system - handles camera movement via mouse input
+ */
+import { defineQuery } from 'bitecs';
 import * as THREE from 'three';
-import { LocalPlayer, FPController, Transform } from '../../components'; // Added Transform
+import { Player, LocalPlayer, FPController, Transform } from '../../components';
 import { ECS } from '../../world';
 import { InputState } from '../input';
 import { PlayerConfig } from '../../config';
 
-// Removed playerQuery, system now receives eid
-// const playerQuery = defineQuery([LocalPlayer, FPController, Transform]);
-
 export function initPlayerLookSystem(_world: ECS) {
+  // Query specifically for local player first
+  const localPlayerQuery = defineQuery([LocalPlayer, FPController]);
+  const playerQuery = defineQuery([Player, FPController]);
 
-    // Use temporary quaternion for calculations
-    const deltaRotation = new THREE.Quaternion();
-    const currentRotation = new THREE.Quaternion();
-    const pitchQuat = new THREE.Quaternion();
-    const yawQuat = new THREE.Quaternion();
-    const forward = new THREE.Vector3(0, 0, -1);
-    const worldUp = new THREE.Vector3(0, 1, 0);
+  return (w: ECS) => {
+    const input = w.input as InputState;
 
+    // Skip if pointer isn't locked
+    if (!input.pointerLocked) {
+      input.dx = input.dy = 0;
+      return w;
+    }
 
-    // System now receives world and the specific local player eid
-    return (w: ECS, eid: number) => {
-        const input = w.input as InputState;
-        if (!input) return w;
+    // Process local player entities first, fallback to Player tag if needed
+    const localEntities = localPlayerQuery(w);
+    const entities = localEntities.length > 0 ? localEntities : playerQuery(w);
+    
+    for (const eid of entities) {
+      // Get the player object that holds the camera
+      const holder = w.ctx.maps.mesh.get(eid);
+      if (!holder) continue;
+      
+      // Update horizontal rotation (yaw)
+      // CRITICAL FIX: Use negative sign for correct mouse movement direction
+      holder.rotation.y = (holder.rotation.y - input.dx * PlayerConfig.MOUSE_SENSITIVITY) % (Math.PI * 2);
+      if (holder.rotation.y < 0) holder.rotation.y += Math.PI * 2;
 
-        // Skip if pointer isn't locked or no mouse movement
-        if (!input.pointerLocked || (input.dx === 0 && input.dy === 0)) {
-             input.dx = input.dy = 0; // Still reset deltas
-             return w;
-        }
-
-        // --- Process only the local player entity 'eid' ---
-        const holder = w.ctx.maps.mesh.get(eid); // Get the Object3D holder
-        if (!holder) return w;
-
-        // --- Yaw (Horizontal Rotation) - Applied to the holder/RigidBody/Transform ---
-        const yawAngle = -input.dx * PlayerConfig.MOUSE_SENSITIVITY;
-        yawQuat.setFromAxisAngle(worldUp, yawAngle);
-
-        // Get current rotation from Transform component
-        currentRotation.set(Transform.qx[eid], Transform.qy[eid], Transform.qz[eid], Transform.qw[eid]);
-
-        // Apply yaw to the current rotation
-        currentRotation.multiplyQuaternions(yawQuat, currentRotation); // Yaw multiplies from the left for world Y rotation
-        currentRotation.normalize();
-
-        // Update Transform component with new rotation
-        Transform.qx[eid] = currentRotation.x;
-        Transform.qy[eid] = currentRotation.y;
-        Transform.qz[eid] = currentRotation.z;
-        Transform.qw[eid] = currentRotation.w;
-
-         // Apply yaw rotation directly to the Object3D holder for immediate visual feedback
-         // This might be slightly redundant if RenderSync handles it, but helps responsiveness.
-         // Ensure holder.rotation is updated if RenderSync relies on it.
-         // holder.quaternion.copy(currentRotation); // Or let RenderSync handle this from Transform
-
-        // --- Pitch (Vertical Rotation) - Applied only to the camera ---
-        const currentPitch = FPController.pitch[eid];
-        let newPitch = currentPitch - input.dy * PlayerConfig.MOUSE_SENSITIVITY;
-        newPitch = THREE.MathUtils.clamp(newPitch, -Math.PI / 2 * 0.99, Math.PI / 2 * 0.99); // Clamp pitch
-
-        // Update pitch in FPController component
-        FPController.pitch[eid] = newPitch;
-
-        // Apply pitch directly to the camera object
-        const camera = w.ctx.three.camera;
-        if (camera) {
-             // We rotate camera locally around its X axis
-            pitchQuat.setFromAxisAngle(new THREE.Vector3(1, 0, 0), newPitch);
-            camera.quaternion.copy(pitchQuat); // Set camera's local rotation
-        }
-
-        // Reset mouse deltas after processing
-        input.dx = input.dy = 0;
-
-        return w;
-    };
+      // Update vertical look (pitch) with clamping
+      FPController.pitch[eid] = THREE.MathUtils.clamp(
+        FPController.pitch[eid] - input.dy * PlayerConfig.MOUSE_SENSITIVITY, 
+        -Math.PI / 2,  // Look up limit
+        Math.PI / 2    // Look down limit
+      );
+      
+      // Apply pitch to camera
+      const camera = w.ctx.three.camera;
+      if (camera) {
+        camera.rotation.x = FPController.pitch[eid];
+      }
+      
+      // Update Transform component with the correct rotation values
+      // This is critical for network synchronization
+      const quaternion = new THREE.Quaternion();
+      holder.getWorldQuaternion(quaternion);
+      
+      // Update ECS components with the current state
+      Transform.qx[eid] = quaternion.x;
+      Transform.qy[eid] = quaternion.y;
+      Transform.qz[eid] = quaternion.z;
+      Transform.qw[eid] = quaternion.w;
+    }
+    
+    // Reset mouse deltas
+    input.dx = input.dy = 0;
+    
+    return w;
+  };
 }
 
 ================================================
 File: /src/ecs/systems/player/movementSystem.ts
 ================================================
-import { FPController, Transform } from '../../components';
+/**
+ * Player movement system - handles movement, jumping, and physics integration
+ */
+import { defineQuery } from 'bitecs';
+import { Player, LocalPlayer, RigidBodyRef, FPController, Transform } from '../../components';
 import { ECS } from '../../world';
 import { InputState } from '../input';
 import { vec2Pool, vec3Pool } from '../../utils/mathUtils';
 import { PlayerConfig, MovementState } from '../../config';
 import * as THREE from 'three';
 
-// Removed playerQuery, system now receives eid
-// const playerQuery = defineQuery([LocalPlayer, RigidBodyRef, FPController]);
-
 export function initPlayerMovementSystem(_world: ECS) {
+  // Query for either Player or LocalPlayer entities with required components
+  const playerQuery = defineQuery([Player, RigidBodyRef, FPController]);
+  const localPlayerQuery = defineQuery([LocalPlayer, RigidBodyRef, FPController]);
+  
+  // Reused vector objects to avoid allocations
   const dir = vec3Pool.get();
   const horiz = vec2Pool.get();
+  
+  // Track the previous jump state to require releasing space before jumping again
   let prevJump = false;
 
-  // System now receives world and the specific local player eid
-  return (w: ECS, eid: number) => {
+  return (w: ECS) => {
     const input = w.input as InputState;
-    if (!input) return w; // Should not happen if input system runs first
-
+    // Input check removed - initInputSystem is guaranteed to run first
+    
     const now = performance.now();
-
-    // --- Process only the local player entity 'eid' ---
-    const rb = w.ctx.maps.rb.get(eid);
-    const kcc = w.ctx.kcc;
-    const playerCollider = w.ctx.playerCollider;
-
-    if (!rb || !kcc || !playerCollider) return w; // Skip if physics components not ready
-
-    const holder = w.ctx.maps.mesh.get(eid); // Player's visual holder mesh
-    if (!holder) return w;
-
-    // Debugging: Log collider position relative to body
-    const colliderPosition = playerCollider.translation();
-    const rbPosition = rb.translation();
-    const offset = { 
-      x: colliderPosition.x - rbPosition.x,
-      y: colliderPosition.y - rbPosition.y, 
-      z: colliderPosition.z - rbPosition.z 
-    };
     
-    // If offset is unusually large, something's wrong - reset it
-    if (Math.abs(offset.y) > 1) {
-      console.warn(`Fixed collider-body offset, was: ${JSON.stringify(offset)}`);
-      playerCollider.setTranslation(rbPosition);
-    }
+    // Process both player and localPlayer entities
+    // In most cases, entities will have both components
+    const entities = new Set([...playerQuery(w), ...localPlayerQuery(w)]);
+    
+    for (const eid of entities) {
+      const rb = w.ctx.maps.rb.get(eid);
+      const kcc = w.ctx.kcc; // Character controller from player init
+      const playerCollider = w.ctx.playerCollider;
+      
+      // Skip if we don't have all required components
+      if (!rb || !kcc || !playerCollider) continue;
+      
+      // Get the player mesh holder
+      const holder = w.ctx.maps.mesh.get(eid);
+      if (!holder) continue;
+      
+      /* movement state + gravity ------------------------------------- */
+      const grounded = kcc.computedGrounded();
+      if (grounded) FPController.lastGrounded[eid] = now;
 
-    // --- Movement state + gravity ---
-    // Use KCC to check if grounded
-    const grounded = kcc.computedGrounded();
-    if (grounded) FPController.lastGrounded[eid] = now;
+      if (grounded) {
+        FPController.moveState[eid] = MovementState.GROUNDED;
+      } else {
+        FPController.moveState[eid] = FPController.vertVel[eid] > 0 ? 
+          MovementState.JUMPING : MovementState.FALLING;
+      }
+      
+      // Handle jump buffering - store jump request timing
+      // Only allow a new jump request if space was released since last jump
+      const jumpPressed = input.jump && !prevJump;
+      if (jumpPressed && FPController.jumpRequested[eid] === 0) {
+        FPController.jumpRequested[eid] = 1;
+        FPController.lastJumpRequest[eid] = now;
+      } else if (!input.jump) {
+        FPController.jumpRequested[eid] = 0;
+      }
 
-    // Set movement state based on grounded and vertical velocity
-    if (grounded) {
-      FPController.moveState[eid] = MovementState.GROUNDED;
-    } else {
-      FPController.moveState[eid] = FPController.vertVel[eid] > 0 ?
-        MovementState.JUMPING : MovementState.FALLING;
-    }
+      // Check if we can jump with either direct input or buffered input
+      const canJump = (grounded || now - FPController.lastGrounded[eid] < PlayerConfig.COYOTE_MS) && 
+                      now - FPController.lastJump[eid] > PlayerConfig.JUMP_CD_MS;
+      
+      // Execute jump if conditions met, including buffered jumps
+      if (canJump && (jumpPressed || (now - FPController.lastJumpRequest[eid] < PlayerConfig.JUMP_BUFFER_MS))) {
+        FPController.vertVel[eid] = PlayerConfig.JUMP_VEL;
+        FPController.lastJump[eid] = now;
+        FPController.jumpRequested[eid] = 0;
+      }
 
-    // Jump buffering
-    const jumpPressed = input.jump && !prevJump;
-    if (jumpPressed && FPController.jumpRequested[eid] === 0) {
-      FPController.jumpRequested[eid] = 1;
-      FPController.lastJumpRequest[eid] = now;
-    } else if (!input.jump) {
-      FPController.jumpRequested[eid] = 0;
-    }
+      // Store previous jump state for next frame
+      prevJump = input.jump;
 
-    // Check if can jump using coyote time (grace period after leaving edge)
-    const canJump = (grounded || now - FPController.lastGrounded[eid] < PlayerConfig.COYOTE_MS) &&
-                    now - FPController.lastJump[eid] > PlayerConfig.JUMP_CD_MS;
+      if (FPController.moveState[eid] !== MovementState.GROUNDED) {
+        // Apply gravity with framerate-independent scaling
+        FPController.vertVel[eid] = Math.max(
+          FPController.vertVel[eid] - PlayerConfig.GRAVITY * w.time.dt, 
+          PlayerConfig.TERMINAL_FALL
+        );
+      } else {
+        FPController.vertVel[eid] *= 0.8;
+        if (Math.abs(FPController.vertVel[eid]) < 0.1) FPController.vertVel[eid] = 0;
+      }
 
-    // Execute jump with buffering
-    if (canJump && (jumpPressed || (now - FPController.lastJumpRequest[eid] < PlayerConfig.JUMP_BUFFER_MS))) {
-      FPController.vertVel[eid] = PlayerConfig.JUMP_VEL;
-      FPController.lastJump[eid] = now;
-      FPController.jumpRequested[eid] = 0;
-      console.log("JUMP EXECUTED!");
-    }
-    prevJump = input.jump;
-
-    // Apply gravity or stick to ground
-    if (FPController.moveState[eid] !== MovementState.GROUNDED) {
-      FPController.vertVel[eid] = Math.max(
-        FPController.vertVel[eid] - PlayerConfig.GRAVITY * w.time.dt,
-        PlayerConfig.TERMINAL_FALL
+      /* directional input -------------------------------------------- */
+      dir.set(
+        (input.rt ? 1 : 0) - (input.lf ? 1 : 0),
+        0,
+        (input.bk ? 1 : 0) - (input.fw ? 1 : 0)
       );
-    } else {
-      // Apply slight downward force when grounded to help stick to slopes
-      FPController.vertVel[eid] = -2.0; // Small negative velocity when grounded
+      
+      if (dir.lengthSq() > 0) dir.normalize();
+      
+      // Get a temporary up vector, use it, then release it
+      const upVector = vec3Pool.get().set(0, 1, 0);
+      dir.applyAxisAngle(upVector, holder.rotation.y);
+      vec3Pool.release(upVector);
+
+      // Base speed calculation
+      const speed = PlayerConfig.WALK_SPEED *
+                    (FPController.moveState[eid] === MovementState.GROUNDED ? 
+                      1 : PlayerConfig.AIR_CONTROL) *
+                    (input.sprint ? PlayerConfig.SPRINT_FACTOR : 1);
+
+      horiz.set(dir.x * speed, dir.z * speed);
+
+      /* KCC integration ---------------------------------------------- */
+      // Always scale movement by delta time for frame independence
+      const dt = w.time.shouldRunPhysics ? w.time.fixedDt! : w.time.dt;
+      
+      const requested = {
+        x: horiz.x * dt,
+        y: FPController.vertVel[eid] * dt,
+        z: horiz.y * dt
+      };
+      
+      // Now safe to use playerCollider since we checked it above
+      kcc.computeColliderMovement(playerCollider, requested);
+      const actual = kcc.computedMovement();
+
+      if (FPController.vertVel[eid] > 0 && actual.y < requested.y * 0.9) {
+        FPController.vertVel[eid] = 0; // head hit
+      }
+
+      const p = rb.translation();
+      rb.setNextKinematicTranslation({
+        x: p.x + actual.x,
+        y: p.y + actual.y,
+        z: p.z + actual.z
+      });
+      
+      holder.position.set(p.x + actual.x, p.y + actual.y, p.z + actual.z);
+      
+      // Update the Transform component for network sync
+      Transform.x[eid] = holder.position.x;
+      Transform.y[eid] = holder.position.y;
+      Transform.z[eid] = holder.position.z;
+      
+      // Update rotation in Transform component for network sync
+      const quaternion = new THREE.Quaternion();
+      holder.getWorldQuaternion(quaternion);
+      Transform.qx[eid] = quaternion.x;
+      Transform.qy[eid] = quaternion.y;
+      Transform.qz[eid] = quaternion.z;
+      Transform.qw[eid] = quaternion.w;
     }
-
-    // --- Directional input ---
-    dir.set(
-      (input.rt ? 1 : 0) - (input.lf ? 1 : 0), // x: right - left
-      0,                                        // y: always zero
-      (input.bk ? 1 : 0) - (input.fw ? 1 : 0)  // z: backward - forward
-    );
-
-    if (dir.lengthSq() > 0) dir.normalize();
-
-    // Apply player's current rotation (yaw) to the direction vector
-    const playerRotation = new THREE.Quaternion(Transform.qx[eid], Transform.qy[eid], Transform.qz[eid], Transform.qw[eid]);
-    dir.applyQuaternion(playerRotation);
-
-    // Base speed with sprint and air control
-    const speed = PlayerConfig.WALK_SPEED *
-                  (FPController.moveState[eid] === MovementState.GROUNDED ? 1 : PlayerConfig.AIR_CONTROL) *
-                  (input.sprint ? PlayerConfig.SPRINT_FACTOR : 1);
-
-    horiz.set(dir.x * speed, dir.z * speed);
-
-    // --- KCC integration ---
-    const dt = w.time.dt; // Use variable dt for input responsiveness
-
-    const desiredMovement = {
-      x: horiz.x * dt,
-      y: FPController.vertVel[eid] * dt,
-      z: horiz.y * dt
-    };
-
-    // Debug logging for movement issues
-    if (!isFinite(desiredMovement.x) || !isFinite(desiredMovement.y) || !isFinite(desiredMovement.z)) {
-      console.error("Invalid movement values:", desiredMovement);
-      desiredMovement.x = 0;
-      desiredMovement.y = 0;
-      desiredMovement.z = 0;
-    }
-
-    // Apply character controller movement
-    kcc.computeColliderMovement(playerCollider, desiredMovement);
-    const actualMovement = kcc.computedMovement();
-
-    // Check for head collision
-    if (FPController.vertVel[eid] > 0 && actualMovement.y < desiredMovement.y * 0.9) {
-      FPController.vertVel[eid] = 0; // Hit ceiling
-    }
-
-    // Apply the computed movement to the rigid body for the next physics step
-    const currentPos = rb.translation();
     
-    // Ensure the collider moves with the rigid body
-    rb.setNextKinematicTranslation({
-      x: currentPos.x + actualMovement.x,
-      y: currentPos.y + actualMovement.y,
-      z: currentPos.z + actualMovement.z
-    });
-
-    // Update the Transform component immediately for network sync and rendering
-    Transform.x[eid] = currentPos.x + actualMovement.x;
-    Transform.y[eid] = currentPos.y + actualMovement.y;
-    Transform.z[eid] = currentPos.z + actualMovement.z;
-
-    // Check for ground state and update animation if needed
-    // We'll apply animations in the animation system, but calculate the state here
-
     return w;
   };
 }
@@ -3493,10 +4583,9 @@ File: /src/ecs/systems/player/shootSystem.ts
 ================================================
 import { defineQuery, hasComponent, addEntity, addComponent } from 'bitecs';
 import * as THREE from 'three';
-import { LocalPlayer, FPController, Transform, Projectile, Lifespan, MeshRef, Velocity, RigidBodyRef } from '../../components'; // Import required components
+import { Player, LocalPlayer, FPController, Transform, Projectile, Lifespan, MeshRef, Velocity, RigidBodyRef } from '../../components'; // Import required components
 import { ECS } from '../../world';
 import { InputState } from '../input';
-import { network } from '../network/client'; // Import network client
 import { WeaponConfig } from '../../config';
 import { vec3Pool } from '../../utils/mathUtils'; // Keep for direction calculation
 
@@ -3508,142 +4597,128 @@ let prevShoot = false;
 let lastShotTime = 0; // Client-side visual feedback delay
 
 export function initPlayerShootSystem(_world: ECS) {
+    // Query for either Player or LocalPlayer entities with FPController
+    const playerQuery = defineQuery([Player, FPController]);
+    const localPlayerQuery = defineQuery([LocalPlayer, FPController]);
+    
+    // Keep track of the last shooting state to detect button press
+    let prevShoot = false;
 
-    // System now receives world and the specific local player eid
-    return (w: ECS, eid: number) => {
+    return (w: ECS) => {
         const input = w.input as InputState;
         if (!input) return w;
 
         const now = performance.now();
 
-        // --- Process only the local player entity 'eid' ---
-        const shootStart = input.shoot && !prevShoot;
+        // Process both player and localPlayer entities
+        // In most cases, entities will have both components
+        const entities = new Set([...playerQuery(w), ...localPlayerQuery(w)]);
 
-        // Simple client-side cooldown visual feedback (optional, server is authoritative)
-        const clientSideCooldown = 200; // ms, match WeaponConfig? Or make slightly shorter
-        if (shootStart && now - lastShotTime > clientSideCooldown) {
-             // Get camera for shoot direction
-            const camera = w.ctx.three.camera;
-            if (!camera) return w; // Should not happen
-
-            // Get direction and spawn position
-            const dir = vec3Pool.get();
-            const spawnPos = vec3Pool.get();
-
-            camera.getWorldDirection(dir).normalize();
-            // Spawn slightly in front of camera, aligned with view
-            camera.getWorldPosition(spawnPos).addScaledVector(dir, WeaponConfig.BULLET_SPAWN_DISTANCE);
-
-            console.log(`Local player ${w.ctx.localPlayerId} shooting.`);
+        for (const eid of entities) {
+            // Get player object
+            const holder = w.ctx.maps.mesh.get(eid);
+            if (!holder) continue;
             
-            // Send shoot message to the server - important for multiplayer sync
-            network.send({
-                type: 'shoot',
-                position: { x: spawnPos.x, y: spawnPos.y, z: spawnPos.z },
-                direction: { x: dir.x, y: dir.y, z: dir.z }
-            });
-
-            // Create a physics-based projectile for proper world interaction
-            const projectileEid = createPhysicsProjectile(w, spawnPos, dir);
-
-            lastShotTime = now; // Update client-side timer
-
-            vec3Pool.release(dir);
-            vec3Pool.release(spawnPos);
+            // Only shoot on button press (not held)
+            const shootPressed = input.shoot && !prevShoot;
+            
+            // Check cooldown - lastShot is stored in player component
+            if (shootPressed && now - FPController.lastShot[eid] > WeaponConfig.SHOOT_CD_MS) {
+                spawnBullet(w, w.ctx.three.camera, w.ctx.rapier);
+                FPController.lastShot[eid] = now;
+            }
         }
-
+        
+        // Update previous button state
         prevShoot = input.shoot;
-
+        
         return w;
     };
 }
 
-/**
- * Creates a physics-based projectile with both visual representation and rigid body physics
- * @param world - ECS world instance
- * @param position - Starting position vector
- * @param direction - Direction vector (should be normalized)
- * @returns Entity ID of the created projectile
- */
-function createPhysicsProjectile(world: ECS, position: THREE.Vector3, direction: THREE.Vector3): number {
-    const { rapier, physics, maps, three } = world.ctx;
-    
-    // Create projectile entity
-    const eid = addEntity(world);
-    addComponent(world, Projectile, eid);
-    addComponent(world, Lifespan, eid);
-    addComponent(world, MeshRef, eid);
-    addComponent(world, RigidBodyRef, eid);
-    addComponent(world, Transform, eid);
-    addComponent(world, Velocity, eid);
-    
-    // Setup lifespan
-    Lifespan.ttl[eid] = WeaponConfig.BULLET_TTL_MS;
+// Bullet spawn helper function
+function spawnBullet(
+    w: ECS, camera: THREE.Camera,
+    R: typeof import('@dimforge/rapier3d-compat')
+) {
+    const { physics, maps } = w.ctx;
+
+    const eid = addEntity(w);
+    addComponent(w, Projectile,   eid);
+    addComponent(w, Lifespan,     eid);
+    addComponent(w, RigidBodyRef, eid);
+    addComponent(w, MeshRef,      eid);
+    addComponent(w, Transform,    eid);
+    addComponent(w, Velocity,     eid);
+
+    Lifespan.ttl[eid]  = WeaponConfig.BULLET_TTL_MS;
     Lifespan.born[eid] = performance.now();
-    
-    // Setup transform
-    Transform.x[eid] = position.x;
-    Transform.y[eid] = position.y;
-    Transform.z[eid] = position.z;
-    Transform.qx[eid] = 0; Transform.qy[eid] = 0; Transform.qz[eid] = 0; Transform.qw[eid] = 1;
-    
-    // Setup velocity
-    Velocity.x[eid] = direction.x * WeaponConfig.BULLET_SPEED;
-    Velocity.y[eid] = direction.y * WeaponConfig.BULLET_SPEED;
-    Velocity.z[eid] = direction.z * WeaponConfig.BULLET_SPEED;
-    
-    // Create visual mesh
+
+    /* mesh */
     const mesh = new THREE.Mesh(
-        new THREE.SphereGeometry(0.08, 8, 8),
-        new THREE.MeshStandardMaterial({ 
-            color: 0xff4400,
-            emissive: 0xff2200,
-            emissiveIntensity: 0.4,
-            roughness: 0.3,
-            metalness: 0.7
+        new THREE.SphereGeometry(0.1, 8, 8),
+        new THREE.MeshStandardMaterial({
+            color: 0xff9900, roughness: 0.3, metalness: 0.7,
+            emissive: 0xff9900, emissiveIntensity: 0.5
         })
     );
     mesh.castShadow = true;
-    mesh.position.copy(position);
-    three.scene.add(mesh);
+
+    // Get direction from camera (reuse vectors)
+    const dir = vec3Pool.get();
+    camera.getWorldDirection(dir).normalize();
+    
+    // Get spawn position (reuse vectors)
+    const spawn = vec3Pool.get();
+    camera.getWorldPosition(spawn).addScaledVector(dir, WeaponConfig.BULLET_SPAWN_DISTANCE);
+    
+    // Apply to mesh
+    mesh.position.copy(spawn);
+
+    // Add to scene
+    w.ctx.three.scene.add(mesh);
     maps.mesh.set(eid, mesh);
-    
-    // Create physics rigid body with CCD enabled to prevent tunneling
+
+    /* rigid body */
+    // Store velocity for client-side prediction
+    Velocity.x[eid] = dir.x * WeaponConfig.BULLET_SPEED;
+    Velocity.y[eid] = dir.y * WeaponConfig.BULLET_SPEED;
+    Velocity.z[eid] = dir.z * WeaponConfig.BULLET_SPEED;
+
+    // Create a rigid body with CCD enabled to prevent tunneling at high speeds
     const rb = physics.createRigidBody(
-        rapier.RigidBodyDesc.dynamic()
-            .setTranslation(position.x, position.y, position.z)
-            .setCcdEnabled(true) // Critical for fast projectiles to prevent tunneling
-            .setLinvel(direction.x * WeaponConfig.BULLET_SPEED, 
-                      direction.y * WeaponConfig.BULLET_SPEED, 
-                      direction.z * WeaponConfig.BULLET_SPEED)
+        R.RigidBodyDesc.dynamic()
+            .setTranslation(spawn.x, spawn.y, spawn.z)
+            .setCcdEnabled(true)
+            .setLinvel(dir.x * WeaponConfig.BULLET_SPEED, 
+                      dir.y * WeaponConfig.BULLET_SPEED, 
+                      dir.z * WeaponConfig.BULLET_SPEED)
     );
-    
-    // Create bullet collider
+
+    // Create a small spherical collider
     physics.createCollider(
-        rapier.ColliderDesc.ball(0.08) // Match visual size
+        R.ColliderDesc.ball(0.1)
             .setDensity(2.0)
             .setFriction(0.0)
-            .setRestitution(0.4), // Bounce off surfaces slightly
+            .setRestitution(0.2),
         rb
     );
-    
-    // Store rigid body and update entity-handle mapping
+
     maps.rb.set(eid, rb);
     RigidBodyRef.id[eid] = rb.handle;
     
-    // Update entity handle map for collision detection
-    if (world.ctx.entityHandleMap) {
-        world.ctx.entityHandleMap.set(rb.handle, eid);
-    } else {
-        world.ctx.entityHandleMap = new Map<number, number>();
-        world.ctx.entityHandleMap.set(rb.handle, eid);
+    // Add to entity handle map for collision detection
+    if (w.ctx.entityHandleMap) {
+        w.ctx.entityHandleMap.set(rb.handle, eid);
     }
     
-    return eid;
+    // Release pooled vectors
+    vec3Pool.release(dir);
+    vec3Pool.release(spawn);
 }
 
-/** 
- * Creates a visual-only projectile for remote player shots
+/**
+ * Creates a physics-based projectile for remote player shots
  * Used by network system when receiving shot events from other players
  */
 export function createVisualProjectile(world: ECS, position: THREE.Vector3, direction: THREE.Vector3, color = 0x00aaff): number {
@@ -3786,13 +4861,13 @@ File: /src/ecs/systems/renderSync.ts
 import { defineQuery, hasComponent, exitQuery } from 'bitecs';
 import { ECS } from '../world';
 import {
-  MeshRef, RigidBodyRef, Transform, LocalPlayer, RemotePlayer, InterpolationTarget // Added RemotePlayer, InterpolationTarget
+  MeshRef, RigidBodyRef, Transform, LocalPlayer, RemotePlayer, InterpolationTarget, Player, FPController
 } from '../components';
 import { vec3Pool, quatPool, interpolatePositions, interpolateRotations } from '../utils/mathUtils';
 import * as THREE from 'three'; // Import THREE
 
 export function initRenderSyncSystem(_world: ECS) {
-    const localPlayerQuery = defineQuery([LocalPlayer, MeshRef, RigidBodyRef]);
+    const localPlayerQuery = defineQuery([LocalPlayer, MeshRef, RigidBodyRef, Transform, FPController]);
     const remotePlayerQuery = defineQuery([RemotePlayer, MeshRef, InterpolationTarget, Transform]); // Remote players use InterpolationTarget & Transform
     const otherRbQuery = defineQuery([MeshRef, RigidBodyRef]); // Query for non-player rigid bodies
     const allMeshQuery = defineQuery([MeshRef]); // For cleanup
@@ -3830,13 +4905,20 @@ export function initRenderSyncSystem(_world: ECS) {
             const mesh = w.ctx.maps.mesh.get(eid)!;
             const rb = w.ctx.maps.rb.get(eid);
             if (mesh && rb) {
-                 // Get the *current* (potentially interpolated by Rapier) kinematic position
+                 // Get current physics translation (position)
                  const p = rb.translation();
-                 // Rotation comes from the Transform component updated by look system
-                 const r = { x: Transform.qx[eid], y: Transform.qy[eid], z: Transform.qz[eid], w: Transform.qw[eid] };
-
+                 
+                 // CRITICAL FIX: Only update the position from physics
+                 // Do NOT update the rotation - lookSystem handles this
                  mesh.position.set(p.x, p.y, p.z);
-                 mesh.quaternion.set(r.x, r.y, r.z, r.w);
+                 
+                 // Update Transform position components
+                 Transform.x[eid] = p.x;
+                 Transform.y[eid] = p.y;
+                 Transform.z[eid] = p.z;
+                 
+                 // Transform rotation components should be updated by lookSystem
+                 // DO NOT update Transform rotation components here
             }
         }
 
@@ -3860,7 +4942,10 @@ export function initRenderSyncSystem(_world: ECS) {
             // Simple Lerp for now - replace with time-based interpolation later
             const lerpFactor = 0.2; // Adjust for smoothness
             currentPos.lerp(targetPos, lerpFactor);
-            currentRot.slerp(targetRot, lerpFactor);
+            
+            // Use slower slerp for rotation to avoid jitter
+            const rotLerpFactor = 0.15;
+            currentRot.slerp(targetRot, rotLerpFactor);
 
 
             // Update the Transform component with the interpolated visual state
@@ -3888,7 +4973,7 @@ export function initRenderSyncSystem(_world: ECS) {
         const otherRbEntities = otherRbQuery(w);
         for (const eid of otherRbEntities) {
             // Skip if it's a player (handled above)
-            if (hasComponent(w, LocalPlayer, eid) || hasComponent(w, RemotePlayer, eid)) continue;
+            if (hasComponent(w, LocalPlayer, eid) || hasComponent(w, RemotePlayer, eid) || hasComponent(w, Player, eid)) continue;
 
             const mesh = w.ctx.maps.mesh.get(eid)!;
             const rb = w.ctx.maps.rb.get(eid);

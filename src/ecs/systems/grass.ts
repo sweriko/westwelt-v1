@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { ECS } from '../world';
 import { defineQuery, enterQuery, exitQuery } from 'bitecs';
 import { CubeTag, Transform } from '../components';
+import { SceneConfig } from '../config';
 
 // Custom shader material class for grass
 class ShaderManager {
@@ -139,7 +140,7 @@ class ShaderManager {
         float randomAngle = hashVal1.x * 2.0 * 3.14159;
         float randomShade = clamp(hashVal1.y * 0.5 + 0.5, 0.5, 1.0);
         float randomHeight = mix(0.75, 1.5, hashVal1.z * 0.5 + 0.5) * mix(1.0, 0.0, lodFadeIn) * isGrassAllowed * heightmapSampleHeight;
-        float randomWidth = (1.0 - isSandy) * heightmapSampleHeight;
+        float randomWidth = mix(0.5, 1.2, hashVal1.y) * (1.0 - isSandy) * heightmapSampleHeight;
         float randomLean = mix(0.1, 0.4, hashVal1.w * 0.5 + 0.5);
 
         vec2 hashGrassColour = hash22(vec2(grassBladeWorldPos.x, grassBladeWorldPos.z)) * 0.5 + 0.5;
@@ -435,55 +436,137 @@ const randRange = (min: number, max: number): number => {
 };
 
 // Constants for grass rendering
-const NUM_GRASS = (32 * 32) * 3;
+const NUM_GRASS = (32 * 32) * 3 / 32; // Reduced to 1/32 of original density
 const GRASS_SEGMENTS_LOW = 1;
 const GRASS_SEGMENTS_HIGH = 6;
 const GRASS_VERTICES_LOW = (GRASS_SEGMENTS_LOW + 1) * 2;
 const GRASS_VERTICES_HIGH = (GRASS_SEGMENTS_HIGH + 1) * 2;
-const GRASS_LOD_DIST = 25;
-const GRASS_MAX_DIST = 180;
-const GRASS_PATCH_SIZE = 5 * 2;
-const GRASS_WIDTH = 0.1;
+const GRASS_LOD_DIST = 25 * 8; // Extended by 8x
+const GRASS_MAX_DIST = 180 * 8; // Extended by 8x
+const GRASS_PATCH_SIZE = (5 * 2) / 8; // Reduced to 1/8 of original size
+const GRASS_WIDTH = 0.06; // Thinner grass blades
 const GRASS_HEIGHT = 1.5;
+const GRASS_CULLING_FACTOR = 0.25; // Only show 25% of grass patches
+
+// Hash function for deterministic culling based on position
+function hashPosition(x: number, z: number): number {
+  return Math.abs(Math.sin(x * 12.9898 + z * 78.233) * 43758.5453) % 1;
+}
 
 // Grass component implementation
 class GrassComponent {
   private meshesLow: THREE.Mesh[] = [];
   private meshesHigh: THREE.Mesh[] = [];
-  private group: THREE.Group;
+  private group: THREE.Group = new THREE.Group();
   private totalTime: number = 0;
-  private grassMaterialLow: CustomShaderMaterial;
-  private grassMaterialHigh: CustomShaderMaterial;
-  private geometryLow: THREE.InstancedBufferGeometry;
-  private geometryHigh: THREE.InstancedBufferGeometry;
+  private grassMaterialLow!: CustomShaderMaterial;
+  private grassMaterialHigh!: CustomShaderMaterial;
+  private geometryLow!: THREE.InstancedBufferGeometry;
+  private geometryHigh!: THREE.InstancedBufferGeometry;
   private readonly _scene: THREE.Scene;
-  private grassTexture: THREE.Texture;
-
+  private grassTexture!: THREE.Texture;
+  private heightmapTexture: THREE.Texture | null = null;
+  private heightmapData: Uint8ClampedArray | null = null;
+  private heightmapWidth: number = 0;
+  private heightmapHeight: number = 0;
+  private _terrainSize: { width: number, depth: number } = { width: 200, depth: 200 };
+  private _heightScale: number = 40;
+  
   constructor(scene: THREE.Scene, private camera: THREE.PerspectiveCamera) {
     this._scene = scene;
-    this.group = new THREE.Group();
-    this.group.name = "GRASS";
+    scene.add(this.group);
     
     // Load grass texture
-    this.grassTexture = new THREE.TextureLoader().load('/textures/grassblade.png');
-    this.grassTexture.wrapS = THREE.ClampToEdgeWrapping;
-    this.grassTexture.wrapT = THREE.ClampToEdgeWrapping;
-    this.grassTexture.minFilter = THREE.LinearFilter;
-    this.grassTexture.magFilter = THREE.LinearFilter;
-    this.grassTexture.generateMipmaps = true;
-    // The texture contains 5 blades horizontally, prevent texture bleeding between variants
-    this.grassTexture.anisotropy = 16; // Improves appearance at angles
+    const textureLoader = new THREE.TextureLoader();
+    textureLoader.load('/public/textures/grassblade.png', (texture) => {
+      this.grassTexture = texture;
+      texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
+      texture.minFilter = THREE.LinearMipmapLinearFilter;
+      texture.magFilter = THREE.LinearFilter;
+      
+      // Create grass materials and geometries
+      this.grassMaterialLow = this.createGrassMaterial(true);
+      this.grassMaterialHigh = this.createGrassMaterial(false);
+      this.geometryLow = this.createGrassGeometry(GRASS_SEGMENTS_LOW);
+      this.geometryHigh = this.createGrassGeometry(GRASS_SEGMENTS_HIGH);
+      
+      console.log("Grass system initialized");
+    });
     
-    // Initialize grass materials
-    this.grassMaterialLow = this.createGrassMaterial(true);
-    this.grassMaterialHigh = this.createGrassMaterial(false);
+    // Load terrain heightmap
+    textureLoader.load('/public/terrain/heightmap.png', (texture) => {
+      this.heightmapTexture = texture;
+      
+      // Extract heightmap data for sampling
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d')!;
+      canvas.width = texture.image.width;
+      canvas.height = texture.image.height;
+      this.heightmapWidth = canvas.width;
+      this.heightmapHeight = canvas.height;
+      
+      ctx.drawImage(texture.image, 0, 0);
+      this.heightmapData = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+      
+      console.log(`Loaded terrain heightmap: ${canvas.width}x${canvas.height}`);
+    });
+  }
+  
+  // Setters for terrain properties
+  set terrainSize(size: { width: number, depth: number }) {
+    this._terrainSize = size;
+  }
+  
+  set heightScale(scale: number) {
+    this._heightScale = scale;
+  }
+  
+  // Get height at world position from heightmap
+  private getTerrainHeight(x: number, z: number): number {
+    if (!this.heightmapData || this.heightmapWidth === 0 || this.heightmapHeight === 0) {
+      return 0;
+    }
     
-    // Create grass geometries
-    this.geometryLow = this.createGrassGeometry(GRASS_SEGMENTS_LOW);
-    this.geometryHigh = this.createGrassGeometry(GRASS_SEGMENTS_HIGH);
+    // Convert world coordinates to heightmap UV coordinates
+    const u = (x + this._terrainSize.width / 2) / this._terrainSize.width;
+    const v = (z + this._terrainSize.depth / 2) / this._terrainSize.depth;
     
-    // Add group to scene
-    scene.add(this.group);
+    // Clamp to valid range
+    const clampedU = Math.max(0, Math.min(1, u));
+    const clampedV = Math.max(0, Math.min(1, v));
+    
+    // Convert to pixel coordinates
+    const px = Math.floor(clampedU * (this.heightmapWidth - 1));
+    const py = Math.floor(clampedV * (this.heightmapHeight - 1));
+    
+    // Sample heightmap
+    const index = (py * this.heightmapWidth + px) * 4;
+    const height = this.heightmapData[index] / 255.0;
+    
+    // Scale to terrain height
+    return height * this._heightScale;
+  }
+
+  // Calculate terrain normal at given world position by sampling neighboring heights
+  private getTerrainNormal(x: number, z: number): THREE.Vector3 {
+    const sampleDistance = 1.0; // Distance between sample points
+    
+    // Sample heights at neighboring points
+    const heightCenter = this.getTerrainHeight(x, z);
+    const heightLeft = this.getTerrainHeight(x - sampleDistance, z);
+    const heightRight = this.getTerrainHeight(x + sampleDistance, z);
+    const heightUp = this.getTerrainHeight(x, z - sampleDistance);
+    const heightDown = this.getTerrainHeight(x, z + sampleDistance);
+    
+    // Calculate partial derivatives (slopes)
+    const slopeX = (heightRight - heightLeft) / (2 * sampleDistance);
+    const slopeZ = (heightDown - heightUp) / (2 * sampleDistance);
+    
+    // Create normal vector using cross product
+    // For a heightfield, the normal can be calculated from the slopes
+    const normal = new THREE.Vector3(-slopeX, 1.0, -slopeZ).normalize();
+    
+    return normal;
   }
 
   private createGrassMaterial(isLowDetail: boolean): CustomShaderMaterial {
@@ -539,12 +622,25 @@ class GrassComponent {
       indices[i*12+11] = fi + 2;
     }
 
-    // Create offsets
+    // Create offsets with more sparse distribution
     const offsets: number[] = [];
     for (let i = 0; i < NUM_GRASS; ++i) {
-      offsets.push(randRange(-GRASS_PATCH_SIZE * 0.5, GRASS_PATCH_SIZE * 0.5));
-      offsets.push(randRange(-GRASS_PATCH_SIZE * 0.5, GRASS_PATCH_SIZE * 0.5));
-      offsets.push(0);
+      // Add random jitter to make grass placement less uniform
+      const x = randRange(-GRASS_PATCH_SIZE * 0.5, GRASS_PATCH_SIZE * 0.5);
+      const z = randRange(-GRASS_PATCH_SIZE * 0.5, GRASS_PATCH_SIZE * 0.5);
+      
+      // Use deterministic culling based on position
+      const bladeHash = hashPosition(x * 100, z * 100);
+      if (bladeHash < 0.7) {  // Only keep 70% of blades
+        offsets.push(x);
+        offsets.push(z);
+        offsets.push(0); // Y will be set at runtime based on terrain
+      } else {
+        // Still need to push something to maintain count
+        offsets.push(x);
+        offsets.push(z);
+        offsets.push(-1000); // Place far below terrain to effectively hide it
+      }
     }
 
     // Create vertex IDs
@@ -626,17 +722,36 @@ class GrassComponent {
     // Camera position flattened to XZ plane for distance calculation
     const cameraPosXZ = new THREE.Vector3(this.camera.position.x, 0, this.camera.position.z);
     
+    // Temp objects for calculations
+    const upVector = new THREE.Vector3(0, 1, 0);
+    const quaternion = new THREE.Quaternion();
+    
     // Spawn grass patches
     let totalGrass = 0;
     let totalVerts = 0;
     
-    for (let x = -22; x < 22; x++) {
-      for (let z = -22; z < 22; z++) {
+    // Increased range to match 8x viewing distance
+    for (let x = -88; x < 88; x++) {
+      for (let z = -88; z < 88; z++) {
+        // Determine patch visibility based on position
+        // Use stable hash value that won't change between frames
+        const cellSeed = (x * 73856093) ^ (z * 19349663);
+        const patchHash = hashPosition(cellSeed, 0);
+        if (patchHash > GRASS_CULLING_FACTOR) {
+          continue;
+        }
+        
         // Current cell position
+        const cellX = baseCellPos.x + x * GRASS_PATCH_SIZE;
+        const cellZ = baseCellPos.z + z * GRASS_PATCH_SIZE;
+        
+        // Get terrain height at this position
+        const terrainHeight = this.getTerrainHeight(cellX, cellZ);
+        
         const currentCell = new THREE.Vector3(
-          baseCellPos.x + x * GRASS_PATCH_SIZE, 
-          0,
-          baseCellPos.z + z * GRASS_PATCH_SIZE
+          cellX, 
+          terrainHeight, // Place on terrain surface
+          cellZ
         );
         
         // Create AABB for culling
@@ -645,8 +760,9 @@ class GrassComponent {
           new THREE.Vector3(GRASS_PATCH_SIZE, 1000, GRASS_PATCH_SIZE)
         );
         
-        // Calculate distance to cell
-        const distToCell = aabb.distanceToPoint(cameraPosXZ);
+        // Calculate distance to cell (using XZ plane for consistent culling)
+        const cellXZ = new THREE.Vector3(currentCell.x, 0, currentCell.z);
+        const distToCell = cellXZ.distanceTo(cameraPosXZ);
         
         // Skip if too far
         if (distToCell > GRASS_MAX_DIST) {
@@ -658,18 +774,50 @@ class GrassComponent {
           continue;
         }
         
-        // Create or reuse grass mesh based on distance
-        if (distToCell > GRASS_LOD_DIST) {
-          const mesh = meshesLow.length > 0 ? meshesLow.pop()! : this.createGrassMesh(distToCell);
-          mesh.position.copy(currentCell);
-          mesh.visible = true;
-          totalVerts += GRASS_VERTICES_LOW;
-        } else {
-          const mesh = meshesHigh.length > 0 ? meshesHigh.pop()! : this.createGrassMesh(distToCell);
-          mesh.position.copy(currentCell);
-          mesh.visible = true;
+        // Smooth LOD transition - use low detail mesh for cell near the LOD boundary
+        // Apply stable culling based on distance and position to prevent flickering
+        const transitionWidth = 5.0; // Width of transition zone
+        const lodStart = GRASS_LOD_DIST - transitionWidth;
+        const lodEnd = GRASS_LOD_DIST + transitionWidth;
+        
+        let mesh: THREE.Mesh;
+        
+        if (distToCell < lodStart) {
+          // Clearly in high detail zone
+          mesh = meshesHigh.length > 0 ? meshesHigh.pop()! : this.createGrassMesh(distToCell);
           totalVerts += GRASS_VERTICES_HIGH;
+        } 
+        else if (distToCell > lodEnd) {
+          // Clearly in low detail zone
+          mesh = meshesLow.length > 0 ? meshesLow.pop()! : this.createGrassMesh(distToCell);
+          totalVerts += GRASS_VERTICES_LOW;
         }
+        else {
+          // In transition zone - use a deterministic decision based on cell position
+          // This prevents flickering when moving across the LOD boundary
+          const lodRatio = (distToCell - lodStart) / (lodEnd - lodStart); // 0 to 1
+          const lodDecision = hashPosition(cellX * 0.3, cellZ * 0.3);
+          
+          if (lodDecision > lodRatio) {
+            mesh = meshesHigh.length > 0 ? meshesHigh.pop()! : this.createGrassMesh(lodStart);
+            totalVerts += GRASS_VERTICES_HIGH;
+          } else {
+            mesh = meshesLow.length > 0 ? meshesLow.pop()! : this.createGrassMesh(lodEnd);
+            totalVerts += GRASS_VERTICES_LOW;
+          }
+        }
+        
+        // Set position
+        mesh.position.copy(currentCell);
+        
+        // Calculate terrain normal at this position
+        const normal = this.getTerrainNormal(cellX, cellZ);
+        
+        // Create rotation from normal vector to align grass with terrain slope
+        quaternion.setFromUnitVectors(upVector, normal);
+        mesh.quaternion.copy(quaternion);
+        
+        mesh.visible = true;
         
         totalGrass += 1;
       }
@@ -683,8 +831,21 @@ let grassComponent: GrassComponent | null = null;
 export function initGrassSystem(world: ECS) {
   const { scene, camera } = world.ctx.three;
   
-  // Create the grass component on system init
-  grassComponent = new GrassComponent(scene, camera as THREE.PerspectiveCamera);
+  // Wait a bit for terrain to be initialized before creating grass
+  setTimeout(() => {
+    // Create the grass component after terrain is set up
+    grassComponent = new GrassComponent(scene, camera as THREE.PerspectiveCamera);
+    
+    // Get terrain size from SceneConfig
+    if (grassComponent) {
+      const terrainConfig = SceneConfig.TERRAIN;
+      grassComponent.terrainSize = { 
+        width: terrainConfig.WIDTH || 200, 
+        depth: terrainConfig.DEPTH || 200 
+      };
+      grassComponent.heightScale = terrainConfig.HEIGHT_SCALE || 40;
+    }
+  }, 500);
   
   // Return the system function
   return function grassSystem(world: ECS) {
