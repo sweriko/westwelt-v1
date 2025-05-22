@@ -1,6 +1,7 @@
 export const vertexShader = `
 varying vec2 vUv;
 varying vec3 vNormal;
+varying vec3 vWorldNormal;
 varying vec3 vPosition;
 varying vec3 vWorldPosition;
 varying vec3 vViewPosition;
@@ -9,6 +10,8 @@ varying mat3 vNormalMatrix;
 void main() {
   vUv = uv;
   vNormal = normalize(normalMatrix * normal);
+  // Calculate world-space normal for triplanar mapping
+  vWorldNormal = normalize(mat3(modelMatrix) * normal);
   vPosition = position;
   vec4 worldPosition = modelMatrix * vec4(position, 1.0);
   vWorldPosition = worldPosition.xyz;
@@ -47,25 +50,36 @@ uniform bool enableTextureBombing;
 
 varying vec2 vUv;
 varying vec3 vNormal;
+varying vec3 vWorldNormal;
 varying vec3 vPosition;
 varying vec3 vWorldPosition;
 varying vec3 vViewPosition;
 varying mat3 vNormalMatrix;
 
-// Triplanar mapping function
-vec4 triplanarMapping(sampler2D tex, vec3 pos, vec3 normal, float scale) {
-  // Sample the texture from three different directions
-  vec4 xaxis = texture2D(tex, pos.yz * scale);
-  vec4 yaxis = texture2D(tex, pos.xz * scale);
-  vec4 zaxis = texture2D(tex, pos.xy * scale);
+// Fixed triplanar mapping function using world-space normal
+vec4 triplanarMapping(sampler2D tex, vec3 worldPos, vec3 worldNormal, float scale) {
+  // Use absolute world-space normal for blending weights
+  vec3 blending = abs(worldNormal);
   
-  // Calculate blend weights based on normal
-  vec3 blendWeights = abs(normal);
-  // Ensure the blend weights sum to 1.0
-  blendWeights = blendWeights / (blendWeights.x + blendWeights.y + blendWeights.z);
+  // Apply sharper blending with proper falloff to reduce seams
+  blending = max(blending - 0.2, 0.0);
+  blending = pow(blending, vec3(4.0));
+  blending = blending / (blending.x + blending.y + blending.z + 0.00001);
   
-  // Blend the three samples based on blend weights
-  return xaxis * blendWeights.x + yaxis * blendWeights.y + zaxis * blendWeights.z;
+  // Sample textures with world coordinates
+  vec3 scaledPos = worldPos * scale;
+  
+  // X-axis projection (YZ plane) - side view
+  vec4 xProjection = texture2D(tex, scaledPos.yz);
+  
+  // Y-axis projection (XZ plane) - top/bottom view (what we see when looking down)
+  vec4 yProjection = texture2D(tex, scaledPos.xz);
+  
+  // Z-axis projection (XY plane) - front/back view
+  vec4 zProjection = texture2D(tex, scaledPos.xy);
+  
+  // Blend the projections
+  return xProjection * blending.x + yProjection * blending.y + zProjection * blending.z;
 }
 
 // Texture bombing (micro-detail variation)
@@ -90,47 +104,48 @@ float heightBlend(float height1, float height2, float blend) {
 }
 
 // Combined texture sampling with all techniques
-vec4 getTexture(sampler2D tex, sampler2D normalMap, vec3 pos, vec3 normal, float scale) {
+vec4 getTexture(sampler2D tex, sampler2D normalMap, vec3 worldPos, vec3 worldNormal, float scale) {
   if (enableTriplanar) {
-    return triplanarMapping(tex, pos, normal, scale);
+    return triplanarMapping(tex, worldPos, worldNormal, scale);
   } else if (enableTextureBombing) {
-    return textureBomb(tex, pos.xz * scale, noiseTexture, 1.0);
+    return textureBomb(tex, worldPos.xz * scale, noiseTexture, 1.0);
   } else {
     // Regular texture mapping
-    return texture2D(tex, pos.xz * scale);
+    return texture2D(tex, worldPos.xz * scale);
   }
 }
 
-// Sample normal map with triplanar support
+// Simplified normal mapping to avoid artifacts when looking down
 vec3 getNormal(sampler2D normalMap, vec3 pos, vec3 normal, float scale) {
-  vec3 normalFromMap;
-  
   if (enableTriplanar) {
-    // Get normal from triplanar sampling
-    vec4 packedNormal = triplanarMapping(normalMap, pos, normal, scale);
-    normalFromMap = normalize(packedNormal.rgb * 2.0 - 1.0);
+    // For triplanar mapping, use vertex normal to avoid artifacts
+    // This prevents stretching when looking straight down
+    return normalize(normal);
   } else if (enableTextureBombing) {
     // Get normal from texture bombing
     vec4 packedNormal = textureBomb(normalMap, pos.xz * scale, noiseTexture, 1.0);
-    normalFromMap = normalize(packedNormal.rgb * 2.0 - 1.0);
+    vec3 normalFromMap = normalize(packedNormal.rgb * 2.0 - 1.0);
+    
+    // Simple tangent space calculation
+    vec3 N = normalize(normal);
+    vec3 T = normalize(cross(N, vec3(0.0, 0.0, 1.0)));
+    vec3 B = normalize(cross(N, T));
+    mat3 TBN = mat3(T, B, N);
+    
+    return normalize(TBN * normalFromMap);
   } else {
-    // Regular normal mapping
+    // Regular normal mapping with simple tangent calculation
     vec4 packedNormal = texture2D(normalMap, pos.xz * scale);
-    normalFromMap = normalize(packedNormal.rgb * 2.0 - 1.0);
+    vec3 normalFromMap = normalize(packedNormal.rgb * 2.0 - 1.0);
+    
+    // Simple tangent space calculation
+    vec3 N = normalize(normal);
+    vec3 T = normalize(cross(N, vec3(0.0, 0.0, 1.0)));
+    vec3 B = normalize(cross(N, T));
+    mat3 TBN = mat3(T, B, N);
+    
+    return normalize(TBN * normalFromMap);
   }
-  
-  // Transform normal from tangent to world space
-  vec3 q1 = dFdx(pos);
-  vec3 q2 = dFdy(pos);
-  vec2 st1 = dFdx(vUv);
-  vec2 st2 = dFdy(vUv);
-  
-  vec3 N = normalize(normal);
-  vec3 T = normalize(q1 * st2.t - q2 * st1.t);
-  vec3 B = -normalize(cross(N, T));
-  mat3 TBN = mat3(T, B, N);
-  
-  return normalize(TBN * normalFromMap);
 }
 
 void main() {
@@ -159,17 +174,17 @@ void main() {
   }
   
   // Apply micro-macro texturing: large-scale (macro) and detail-scale (micro)
-  // Macro texture (overall appearance)
-  vec4 snowColor = getTexture(snowTexture, snowNormal, vWorldPosition, vNormal, textureScale);
-  vec4 rockColor = getTexture(rockTexture, rockNormal, vWorldPosition, vNormal, textureScale);
-  vec4 grassColor = getTexture(grassTexture, grassNormal, vWorldPosition, vNormal, textureScale);
-  vec4 sandColor = getTexture(sandTexture, sandNormal, vWorldPosition, vNormal, textureScale);
+  // Macro texture (overall appearance) - use world normal for triplanar
+  vec4 snowColor = getTexture(snowTexture, snowNormal, vWorldPosition, vWorldNormal, textureScale);
+  vec4 rockColor = getTexture(rockTexture, rockNormal, vWorldPosition, vWorldNormal, textureScale);
+  vec4 grassColor = getTexture(grassTexture, grassNormal, vWorldPosition, vWorldNormal, textureScale);
+  vec4 sandColor = getTexture(sandTexture, sandNormal, vWorldPosition, vWorldNormal, textureScale);
   
   // Detail texture (fine details) at a different scale
-  vec4 snowDetail = getTexture(snowTexture, snowNormal, vWorldPosition, vNormal, detailScale);
-  vec4 rockDetail = getTexture(rockTexture, rockNormal, vWorldPosition, vNormal, detailScale);
-  vec4 grassDetail = getTexture(grassTexture, grassNormal, vWorldPosition, vNormal, detailScale);
-  vec4 sandDetail = getTexture(sandTexture, sandNormal, vWorldPosition, vNormal, detailScale);
+  vec4 snowDetail = getTexture(snowTexture, snowNormal, vWorldPosition, vWorldNormal, detailScale);
+  vec4 rockDetail = getTexture(rockTexture, rockNormal, vWorldPosition, vWorldNormal, detailScale);
+  vec4 grassDetail = getTexture(grassTexture, grassNormal, vWorldPosition, vWorldNormal, detailScale);
+  vec4 sandDetail = getTexture(sandTexture, sandNormal, vWorldPosition, vWorldNormal, detailScale);
   
   // Blend macro and micro details
   float detailBlend = 0.3; // Adjust to control detail visibility
@@ -186,7 +201,7 @@ void main() {
     sandColor * sandWeight;
     
   // Apply slope-based blending too
-  float slope = 1.0 - vNormal.y; // 0 for flat, 1 for vertical
+  float slope = 1.0 - vWorldNormal.y; // Use world normal for slope calculation
   float slopeBlend = 0.4;
   
   // More rock on steep slopes

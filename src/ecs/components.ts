@@ -24,7 +24,9 @@ export const FPController = defineComponent({
   lastJump: Types.f32,     // Time when last jumped
   lastShot: Types.f32,     // Time when last shot
   jumpRequested: Types.ui8,// Jump buffer flag
-  lastJumpRequest: Types.f32 // Time when jump was requested
+  lastJumpRequest: Types.f32, // Time when jump was requested
+  fallStartTime: Types.f32,   // When falling started (for threshold timing)
+  lastAnimationChange: Types.f32 // Last time animation state changed
 });
 
 /** Debug visualization mesh references */

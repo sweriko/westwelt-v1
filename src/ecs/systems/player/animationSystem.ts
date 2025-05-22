@@ -6,7 +6,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { Player, LocalPlayer, MeshRef, FPController, AnimationState } from '../../components';
 import { ECS } from '../../world';
-import { MovementState, PlayerAnimationState } from '../../config';
+import { MovementState, PlayerAnimationState, PlayerConfig } from '../../config';
 import { AnimationStateMachine } from './animationStateMachine';
 import { PlayerSystemConfig } from './index';
 
@@ -254,6 +254,8 @@ export function initPlayerAnimationSystem(world: ECS) {
     
     // Update animation state based on entity state
     function updateAnimationState(eid: number, isMoving: boolean, isSprinting: boolean) {
+        const now = performance.now();
+        
         // Use the appropriate animation system based on config
         if (PlayerSystemConfig.USE_FULLBODY_FPS) {
             if (!animationStateMachine) return;
@@ -263,11 +265,35 @@ export function initPlayerAnimationSystem(world: ECS) {
             
             // Get the move state (grounded, jumping, falling)
             const moveState = FPController.moveState[eid];
+            const fallStartTime = FPController.fallStartTime[eid];
+            const lastAnimationChange = FPController.lastAnimationChange[eid];
+            
+            // Check if enough time has passed since last animation change for debouncing
+            const canChangeAnimation = (now - lastAnimationChange) >= PlayerConfig.ANIMATION_STATE_DEBOUNCE_MS;
             
             if (moveState === MovementState.JUMPING) {
                 targetState = PlayerAnimationState.JUMPING;
             } else if (moveState === MovementState.FALLING) {
-                targetState = PlayerAnimationState.FALLING;
+                // Only play falling animation if we've been falling long enough AND fast enough
+                const fallDuration = fallStartTime > 0 ? (now - fallStartTime) : 0;
+                const shouldPlayFall = fallStartTime > 0 && 
+                                     fallDuration >= PlayerConfig.FALL_ANIMATION_TIME_THRESHOLD &&
+                                     FPController.vertVel[eid] <= PlayerConfig.FALL_ANIMATION_VELOCITY_THRESHOLD;
+                
+                if (shouldPlayFall) {
+                    targetState = PlayerAnimationState.FALLING;
+                } else {
+                    // Keep previous animation if not falling long/fast enough
+                    const currentState = AnimationState.state[eid];
+                    if (currentState === PlayerAnimationState.JUMPING) {
+                        targetState = PlayerAnimationState.JUMPING;
+                    } else {
+                        // Default to idle/walking based on movement
+                        targetState = isMoving ? 
+                            (isSprinting ? PlayerAnimationState.RUNNING : PlayerAnimationState.WALKING) :
+                            PlayerAnimationState.IDLE;
+                    }
+                }
             } else {
                 // Player is grounded
                 if (isMoving) {
@@ -279,11 +305,18 @@ export function initPlayerAnimationSystem(world: ECS) {
                 }
             }
             
-            // Apply the state change
-            animationStateMachine.setState(targetState);
-            
-            // Update the Animation component with the current state
-            AnimationState.state[eid] = targetState;
+            // Only apply state change if animation debounce allows it and state actually changed
+            const currentAnimState = AnimationState.state[eid];
+            if (targetState !== currentAnimState && canChangeAnimation) {
+                // Apply the state change
+                const stateChanged = animationStateMachine.setState(targetState);
+                
+                if (stateChanged) {
+                    // Update the Animation component with the current state
+                    AnimationState.state[eid] = targetState;
+                    FPController.lastAnimationChange[eid] = now;
+                }
+            }
         } else {
             // Legacy animation system
             if (movementTimer <= 0) {

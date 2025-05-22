@@ -45,13 +45,28 @@ export function initPlayerMovementSystem(_world: ECS) {
       
       /* movement state + gravity ------------------------------------- */
       const grounded = kcc.computedGrounded();
-      if (grounded) FPController.lastGrounded[eid] = now;
+      if (grounded) {
+        FPController.lastGrounded[eid] = now;
+        FPController.fallStartTime[eid] = 0; // Reset fall tracking when grounded
+      }
 
       if (grounded) {
         FPController.moveState[eid] = MovementState.GROUNDED;
       } else {
-        FPController.moveState[eid] = FPController.vertVel[eid] > 0 ? 
-          MovementState.JUMPING : MovementState.FALLING;
+        if (FPController.vertVel[eid] > 0) {
+          FPController.moveState[eid] = MovementState.JUMPING;
+          FPController.fallStartTime[eid] = 0; // Reset fall tracking when jumping
+        } else {
+          // Only start fall tracking when velocity crosses the threshold
+          if (FPController.vertVel[eid] <= PlayerConfig.FALL_ANIMATION_VELOCITY_THRESHOLD) {
+            if (FPController.fallStartTime[eid] === 0) {
+              FPController.fallStartTime[eid] = now; // Start tracking fall time
+            }
+          } else {
+            FPController.fallStartTime[eid] = 0; // Reset if not falling fast enough
+          }
+          FPController.moveState[eid] = MovementState.FALLING;
+        }
       }
       
       // Handle jump buffering - store jump request timing

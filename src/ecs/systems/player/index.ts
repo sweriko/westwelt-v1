@@ -55,6 +55,8 @@ export function initPlayerSystem(world: ECS) {
   FPController.lastShot[pid] = 0;
   FPController.jumpRequested[pid] = 0;
   FPController.lastJumpRequest[pid] = 0;
+  FPController.fallStartTime[pid] = 0;
+  FPController.lastAnimationChange[pid] = 0;
 
   // Create mesh holder
   const holder = new THREE.Object3D();

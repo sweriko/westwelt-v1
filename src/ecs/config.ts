@@ -20,7 +20,12 @@ export const PlayerConfig = {
   MOUSE_SENSITIVITY: 0.0035,
 
   // Health
-  MAX_HEALTH: 100
+  MAX_HEALTH: 100,
+
+  // Animation thresholds
+  FALL_ANIMATION_VELOCITY_THRESHOLD: -5.0,  // Only trigger falling anim when falling fast
+  FALL_ANIMATION_TIME_THRESHOLD: 300,       // Must be falling for 300ms before playing fall anim
+  ANIMATION_STATE_DEBOUNCE_MS: 150          // Prevent rapid state switching
 };
 
 export const WeaponConfig = {
