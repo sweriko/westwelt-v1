@@ -1,93 +1,99 @@
-import { defineQuery, removeEntity } from 'bitecs';
-import { Lifespan, Projectile } from '../components';
+import { defineQuery, hasComponent, removeEntity } from 'bitecs';
+import { Lifespan, Projectile, Velocity, Transform, MeshRef, RigidBodyRef } from '../components';
 import { ECS } from '../world';
 import * as THREE from 'three';
 
 export function initProjectileSystem(_world: ECS) {
+  // Query for all projectiles, whether physics-based or visual-only
   const projectileQuery = defineQuery([Projectile, Lifespan]);
   
+  // Separate query for visual-only projectiles (those without RigidBody)
+  const visualProjectileQuery = defineQuery([Projectile, Lifespan, Velocity, Transform, MeshRef]);
+  const physicsProjectileQuery = defineQuery([Projectile, Lifespan, RigidBodyRef]);
+
   return (w: ECS) => {
     const now = performance.now();
-    
-    // Create a list of entities to remove to avoid modifying during iteration
+    const delta = w.time.dt; // Use world delta time
+
     const entitiesToRemove: number[] = [];
-    
-    // Process bullet lifetimes and handle destruction
-    for (const eid of projectileQuery(w)) {
-      // Skip processing if already marked for removal
-      if (entitiesToRemove.includes(eid)) continue;
+
+    // First update visual-only projectiles with simple kinematic movement
+    for (const eid of visualProjectileQuery(w)) {
+      // Skip if entity already has a RigidBody (will be handled by physics system)
+      if (hasComponent(w, RigidBodyRef, eid)) continue;
       
-      // Get rigid body reference
-      const rb = w.ctx.maps.rb.get(eid);
-      if (!rb) {
-        // Body reference invalid, mark for removal
-        entitiesToRemove.push(eid);
-        continue;
-      }
-      
-      // Skip if body is no longer valid (prevents "unreachable" errors)
-      try {
-        // Just check if we can access a property - will throw if body is invalid
-        rb.handle;
-      } catch (error) {
-        // Something's wrong with this rigid body, mark for removal
-        console.warn("Invalid rigid body detected, removing entity", eid);
-        entitiesToRemove.push(eid);
-        continue;
-      }
-      
-      // Check if bullet should be removed due to lifetime
-      const expired = now - Lifespan.born[eid] > Lifespan.ttl[eid];
-      
-      // Check if bullet was marked for deletion by collision system
+      // --- Simple Kinematic Movement ---
+      Transform.x[eid] += Velocity.x[eid] * delta;
+      Transform.y[eid] += Velocity.y[eid] * delta;
+      Transform.z[eid] += Velocity.z[eid] * delta;
+
+      // Sync mesh position with Transform
       const mesh = w.ctx.maps.mesh.get(eid);
-      const markedForDeletion = mesh?.userData?.markedForDeletion === true;
-      
-      // Mark for removal if expired or deletion requested
-      if (expired || markedForDeletion) {
-        entitiesToRemove.push(eid);
+      if (mesh) {
+        mesh.position.set(Transform.x[eid], Transform.y[eid], Transform.z[eid]);
       }
     }
-    
-    // Remove all entities marked for deletion
+
+    // Check all projectiles for lifespan and deletion flags
+    for (const eid of projectileQuery(w)) {
+      // --- Check Lifespan ---
+      if (now - Lifespan.born[eid] > Lifespan.ttl[eid]) {
+        entitiesToRemove.push(eid);
+        continue;
+      }
+
+      // --- Check for Deletion Flag (from collision detection) ---
+      const mesh = w.ctx.maps.mesh.get(eid);
+      if (mesh?.userData?.markedForDeletion === true) {
+        if (!entitiesToRemove.includes(eid)) { // Avoid duplicates
+          entitiesToRemove.push(eid);
+        }
+      }
+    }
+
+    // --- Remove Entities ---
     for (const eid of entitiesToRemove) {
       // Get and remove the mesh
       const mesh = w.ctx.maps.mesh.get(eid);
       if (mesh) {
         w.ctx.three.scene.remove(mesh);
-        
-        // Properly cast to THREE.Mesh to access geometry and material
         if (mesh instanceof THREE.Mesh) {
-          if (mesh.geometry) {
-            mesh.geometry.dispose();
-          }
-          
+          mesh.geometry?.dispose();
           if (mesh.material) {
-            // Handle both single and array materials
             if (Array.isArray(mesh.material)) {
-              mesh.material.forEach(material => {
-                if (material) material.dispose();
-              });
+              mesh.material.forEach(material => material?.dispose());
             } else {
               mesh.material.dispose();
             }
           }
         }
-        
         w.ctx.maps.mesh.delete(eid);
       }
-      
-      // Get and remove the rigid body
+
+      // Remove Rapier body if it exists
       const rb = w.ctx.maps.rb.get(eid);
       if (rb) {
         w.ctx.physics.removeRigidBody(rb);
         w.ctx.maps.rb.delete(eid);
+        
+        // Also remove from entity handle map if it exists
+        if (w.ctx.entityHandleMap) {
+          // Search for this entity's handle
+          for (const [handle, entityId] of w.ctx.entityHandleMap.entries()) {
+            if (entityId === eid) {
+              w.ctx.entityHandleMap.delete(handle);
+              break;
+            }
+          }
+        }
       }
-      
-      // Remove the entity
-      removeEntity(w, eid);
+
+      // Remove the entity if it still exists
+      if (hasComponent(w, Projectile, eid)) {
+        removeEntity(w, eid);
+      }
     }
-    
+
     return w;
   };
 }

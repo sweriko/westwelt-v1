@@ -8,6 +8,7 @@ import {
 } from './components';
 import { ECS, ECSContext } from './world';
 import { SceneConfig } from './config';
+import { createTerrain } from './systems/terrain/TerrainSystem';
 
 /* ------------------------------------------------------------------ */
 /* createContext – bootstrap renderer / physics / camera              */
@@ -28,10 +29,10 @@ export async function createContext(
 
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(SceneConfig.SKY_COLOR);
-  scene.fog        = new THREE.FogExp2(0x88BBFF, 0.0025);
+  scene.fog        = new THREE.FogExp2(0x88BBFF, 0.0002);
 
   const camera = new THREE.PerspectiveCamera(
-    75, window.innerWidth / window.innerHeight, 0.1, 1000
+    75, window.innerWidth / window.innerHeight, 0.1, 50000
   );
 
   // Set up window resize handler
@@ -41,13 +42,16 @@ export async function createContext(
   const ctx: ECSContext = {
     rapier, physics,
     three: { scene, camera, renderer },
-    maps : { mesh: new Map(), rb: new Map() }
+    maps : { mesh: new Map(), rb: new Map() },
+    localPlayerId: null
   };
 
   // Set up lighting, sky and ground
   setupLighting(ctx);
   setupSky(ctx);
-  setupGround(ctx);
+  
+  // Commented out the flat ground since we'll use terrain instead
+  // setupGround(ctx);
 
   return ctx;
 }
@@ -79,12 +83,12 @@ function setupLighting(ctx: ECSContext) {
   dirLight.position.set(5, 10, 7);
   dirLight.castShadow = true;
   dirLight.shadow.mapSize.set(2048, 2048);
-  dirLight.shadow.camera.left = -20;
-  dirLight.shadow.camera.right = 20;
-  dirLight.shadow.camera.top = 20;
-  dirLight.shadow.camera.bottom = -20;
+  dirLight.shadow.camera.left = -100;
+  dirLight.shadow.camera.right = 100;
+  dirLight.shadow.camera.top = 100;
+  dirLight.shadow.camera.bottom = -100;
   dirLight.shadow.camera.near = 0.5;
-  dirLight.shadow.camera.far  = 50;
+  dirLight.shadow.camera.far = 500;
   scene.add(dirLight);
 }
 
@@ -104,6 +108,7 @@ function setupSky(ctx: ECSContext) {
 
 /* ------------------------------------------------------------------ */
 /* Helper function to create ground plane                             */
+// This function is kept for reference but not used when terrain is active
 function setupGround(ctx: ECSContext) {
   const scene = ctx.three.scene;
   const { rapier, physics } = ctx;
@@ -135,8 +140,45 @@ function setupGround(ctx: ECSContext) {
 }
 
 /* ------------------------------------------------------------------ */
-/* populateScene – central cube stack + scattered cubes               */
+/* populateScene – central cube stack + scattered cubes + terrain     */
 export function populateScene(world: ECS, ctx: ECSContext): void {
+  // Position camera to see the terrain better - at a moderate height
+  const CAMERA_HEIGHT = 120;
+  ctx.three.camera.position.set(0, CAMERA_HEIGHT, 180);
+  ctx.three.camera.lookAt(0, 40, 0);
+
+  console.log("Creating terrain entity...");
+  
+  // Create terrain entity first so it's ready for collisions
+  const terrainEntity = createTerrain(world, {
+    width: SceneConfig.TERRAIN.WIDTH,
+    height: SceneConfig.TERRAIN.HEIGHT,
+    depth: SceneConfig.TERRAIN.DEPTH,
+    segmentsX: SceneConfig.TERRAIN.SEGMENTS_X,
+    segmentsZ: SceneConfig.TERRAIN.SEGMENTS_Z,
+    heightScale: SceneConfig.TERRAIN.HEIGHT_SCALE,
+    snowHeight: SceneConfig.TERRAIN.SNOW_HEIGHT,
+    rockHeight: SceneConfig.TERRAIN.ROCK_HEIGHT,
+    grassHeight: SceneConfig.TERRAIN.GRASS_HEIGHT,
+    sandHeight: SceneConfig.TERRAIN.SAND_HEIGHT,
+    textureScale: SceneConfig.TERRAIN.TEXTURE_SCALE,
+    detailScale: SceneConfig.TERRAIN.DETAIL_SCALE,
+    normalScale: SceneConfig.TERRAIN.NORMAL_SCALE,
+    enableTriplanar: SceneConfig.TERRAIN.ENABLE_TRIPLANAR,
+    enableTextureBombing: SceneConfig.TERRAIN.ENABLE_TEXTURE_BOMBING
+  });
+  
+  // Give more time for terrain physics to initialize completely
+  console.log("Waiting for terrain initialization...");
+  setTimeout(() => {
+    console.log("Spawning cubes...");
+    spawnCubes(world, ctx);
+  }, 2000);
+}
+
+/* ------------------------------------------------------------------ */
+/* Spawn cubes above the terrain                                      */
+function spawnCubes(world: ECS, ctx: ECSContext): void {
   const { rapier, physics, maps, three } = ctx;
   
   // Create shared geometry and materials for cube factory
@@ -206,24 +248,38 @@ export function populateScene(world: ECS, ctx: ECSContext): void {
     if (world.ctx.entityHandleMap) {
       world.ctx.entityHandleMap.set(rb.handle, eid);
     }
+    
+    return rb;
   };
 
-  /* Create cube stacks */
+  /* Create cube stacks elevated above terrain */
   const stackSize = SceneConfig.CUBE_STACK_SIZE;
   const halfStack = stackSize / 2;
+  
+  // Terrain height at spawn point (approximation)
+  const TERRAIN_BASE_HEIGHT = SceneConfig.TERRAIN.HEIGHT_SCALE * 0.7; // Higher estimate of average terrain height
+  const SPAWN_HEIGHT_OFFSET = 120; // Lower the cube spawn height
+  
+  console.log(`Spawning cubes at base height: ${TERRAIN_BASE_HEIGHT + SPAWN_HEIGHT_OFFSET}`);
   
   // Make a cube stack
   for (let y = 0; y < stackSize; ++y)
     for (let x = 0; x < stackSize; ++x)
-      for (let z = 0; z < stackSize; ++z)
-        makeCube(x - halfStack, y + 0.5, z - halfStack);
+      for (let z = 0; z < stackSize; ++z) {
+        const rb = makeCube(x - halfStack, TERRAIN_BASE_HEIGHT + y + SPAWN_HEIGHT_OFFSET, z - halfStack);
+        // Apply an initial impulse to ensure movement and collision detection
+        rb.applyImpulse({ x: (Math.random() - 0.5) * 0.1, y: 0, z: (Math.random() - 0.5) * 0.1 }, true);
+      }
 
   /* extra cubes */
-  for (let i = 0; i < SceneConfig.EXTRA_CUBES; i++)
-    makeCube(
+  for (let i = 0; i < SceneConfig.EXTRA_CUBES; i++) {
+    const rb = makeCube(
       (Math.random() - 0.5) * 20,
-      10 + Math.random() * 10,
+      TERRAIN_BASE_HEIGHT + SPAWN_HEIGHT_OFFSET + 10 + Math.random() * 10,
       (Math.random() - 0.5) * 20,
       0.5 + Math.random() * 1.5
     );
+    // Apply an initial impulse to ensure movement and collision detection
+    rb.applyImpulse({ x: (Math.random() - 0.5) * 0.1, y: 0, z: (Math.random() - 0.5) * 0.1 }, true);
+  }
 }

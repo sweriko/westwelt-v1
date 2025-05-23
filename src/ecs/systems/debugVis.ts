@@ -1,5 +1,5 @@
 import { defineQuery } from 'bitecs';
-import { DebugVis, Projectile, Player, RigidBodyRef } from '../components';
+import { DebugVis, Projectile, LocalPlayer, RemotePlayer, RigidBodyRef } from '../components';
 import { ECS } from '../world';
 import * as THREE from 'three';
 import { vec3Pool } from '../utils/mathUtils';
@@ -9,7 +9,7 @@ const MAX_TRAJECTORY_POINTS = 100;
 
 export function initDebugVisSystem(world: ECS) {
   const debugQuery = defineQuery([DebugVis]);
-  const playerQuery = defineQuery([Player, RigidBodyRef]);
+  const playerQuery = defineQuery([LocalPlayer, RigidBodyRef]);
   const projectileQuery = defineQuery([Projectile, RigidBodyRef]);
   
   // Store trajectory data

@@ -2,14 +2,17 @@
  * Player movement system - handles movement, jumping, and physics integration
  */
 import { defineQuery } from 'bitecs';
-import { Player, RigidBodyRef, FPController } from '../../components';
+import { Player, LocalPlayer, RigidBodyRef, FPController, Transform } from '../../components';
 import { ECS } from '../../world';
 import { InputState } from '../input';
 import { vec2Pool, vec3Pool } from '../../utils/mathUtils';
 import { PlayerConfig, MovementState } from '../../config';
+import * as THREE from 'three';
 
 export function initPlayerMovementSystem(_world: ECS) {
+  // Query for either Player or LocalPlayer entities with required components
   const playerQuery = defineQuery([Player, RigidBodyRef, FPController]);
+  const localPlayerQuery = defineQuery([LocalPlayer, RigidBodyRef, FPController]);
   
   // Reused vector objects to avoid allocations
   const dir = vec3Pool.get();
@@ -24,7 +27,11 @@ export function initPlayerMovementSystem(_world: ECS) {
     
     const now = performance.now();
     
-    for (const eid of playerQuery(w)) {
+    // Process both player and localPlayer entities
+    // In most cases, entities will have both components
+    const entities = new Set([...playerQuery(w), ...localPlayerQuery(w)]);
+    
+    for (const eid of entities) {
       const rb = w.ctx.maps.rb.get(eid);
       const kcc = w.ctx.kcc; // Character controller from player init
       const playerCollider = w.ctx.playerCollider;
@@ -38,13 +45,28 @@ export function initPlayerMovementSystem(_world: ECS) {
       
       /* movement state + gravity ------------------------------------- */
       const grounded = kcc.computedGrounded();
-      if (grounded) FPController.lastGrounded[eid] = now;
+      if (grounded) {
+        FPController.lastGrounded[eid] = now;
+        FPController.fallStartTime[eid] = 0; // Reset fall tracking when grounded
+      }
 
       if (grounded) {
         FPController.moveState[eid] = MovementState.GROUNDED;
       } else {
-        FPController.moveState[eid] = FPController.vertVel[eid] > 0 ? 
-          MovementState.JUMPING : MovementState.FALLING;
+        if (FPController.vertVel[eid] > 0) {
+          FPController.moveState[eid] = MovementState.JUMPING;
+          FPController.fallStartTime[eid] = 0; // Reset fall tracking when jumping
+        } else {
+          // Only start fall tracking when velocity crosses the threshold
+          if (FPController.vertVel[eid] <= PlayerConfig.FALL_ANIMATION_VELOCITY_THRESHOLD) {
+            if (FPController.fallStartTime[eid] === 0) {
+              FPController.fallStartTime[eid] = now; // Start tracking fall time
+            }
+          } else {
+            FPController.fallStartTime[eid] = 0; // Reset if not falling fast enough
+          }
+          FPController.moveState[eid] = MovementState.FALLING;
+        }
       }
       
       // Handle jump buffering - store jump request timing
@@ -130,8 +152,21 @@ export function initPlayerMovementSystem(_world: ECS) {
       });
       
       holder.position.set(p.x + actual.x, p.y + actual.y, p.z + actual.z);
+      
+      // Update the Transform component for network sync
+      Transform.x[eid] = holder.position.x;
+      Transform.y[eid] = holder.position.y;
+      Transform.z[eid] = holder.position.z;
+      
+      // Update rotation in Transform component for network sync
+      const quaternion = new THREE.Quaternion();
+      holder.getWorldQuaternion(quaternion);
+      Transform.qx[eid] = quaternion.x;
+      Transform.qy[eid] = quaternion.y;
+      Transform.qz[eid] = quaternion.z;
+      Transform.qw[eid] = quaternion.w;
     }
     
     return w;
   };
-} 
+}
